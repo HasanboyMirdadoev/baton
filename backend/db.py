@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS pipeline_runs (
     pipeline_name TEXT NOT NULL,
     task_prompt TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
+    start_stage_index INTEGER NOT NULL DEFAULT 0,
     current_stage_order INTEGER NOT NULL DEFAULT 0,
     review_loop_count INTEGER NOT NULL DEFAULT 0,
     max_review_loops INTEGER NOT NULL DEFAULT 2,
@@ -145,11 +146,17 @@ class Database:
         return conn
 
     def init_db(self) -> None:
-        """Executes schema DDL from ARCHITECTURE.md §9."""
+        """Executes schema DDL from ARCHITECTURE.md §9 and runs additive column migrations."""
         if str(self.db_path) != ":memory:":
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._get_connection() as conn:
             conn.executescript(SCHEMA_DDL)
+            cursor = conn.execute("PRAGMA table_info(pipeline_runs)")
+            columns = {row["name"] for row in cursor.fetchall()}
+            if "start_stage_index" not in columns:
+                conn.execute(
+                    "ALTER TABLE pipeline_runs ADD COLUMN start_stage_index INTEGER NOT NULL DEFAULT 0"
+                )
 
     def recover_orphaned_states(self) -> None:
         """Implements startup crash recovery per ARCHITECTURE.md §9."""
@@ -595,6 +602,7 @@ class Database:
         task_prompt: str,
         max_review_loops: int,
         status: str = "running",
+        start_stage_index: int = 0,
     ) -> Dict[str, Any]:
         run_id = str(uuid.uuid4())
         now = utc_now_iso()
@@ -603,10 +611,10 @@ class Database:
                 """
                 INSERT INTO pipeline_runs (
                     id, pipeline_id, pipeline_name, task_prompt,
-                    status, current_stage_order, review_loop_count,
+                    status, start_stage_index, current_stage_order, review_loop_count,
                     max_review_loops, error_message, started_at,
                     finished_at, duration_ms
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -614,7 +622,8 @@ class Database:
                     pipeline_name,
                     task_prompt,
                     status,
-                    0,
+                    start_stage_index,
+                    start_stage_index,
                     0,
                     max_review_loops,
                     None,

@@ -2,17 +2,27 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+import sqlite3
 from typing import Any, Dict, Set
 
 import pytest
 
 from backend.db import Database
-from backend.models import ConflictError, PipelineRunStatus, StageRunStatus, ValidationError
+from backend.models import (
+    ConflictError,
+    NotFoundError,
+    PipelineRunStatus,
+    StageRunStatus,
+    UnprocessableError,
+    ValidationError,
+)
 from backend.pipeline_engine import (
     PipelineEngine,
+    build_forward_prompt,
     parse_reviewer_verdict,
     validate_pipeline_stages,
 )
+from backend.session_manager import SessionManager
 
 
 def _create_four_role_sessions(db: Database, workspace_dir: Path) -> Dict[str, Dict[str, Any]]:
@@ -358,3 +368,239 @@ def test_pipeline_approval_pause_and_stop(
         assert sr_after_create["turn_id"] == created_turn["id"]
 
     asyncio.run(_run())
+
+
+def test_build_forward_prompt_formatting() -> None:
+    # Default instructions when None or empty
+    p1 = build_forward_prompt(
+        source_session_name="Arch Designer",
+        source_role_label="designer",
+        turn_number=2,
+        response_text="Design spec body",
+        instructions=None,
+    )
+    expected_p1 = (
+        "# Handoff from Arch Designer (Designer)\n\n"
+        "Proceed with your role using the output below.\n\n"
+        "---\n\n"
+        "# Output from Arch Designer (Designer, turn #2)\n\n"
+        "Design spec body"
+    )
+    assert p1 == expected_p1
+
+    # Custom instructions with reviewer role
+    p2 = build_forward_prompt(
+        source_session_name="Rev Session",
+        source_role_label="reviewer",
+        turn_number=3,
+        response_text="Review findings here",
+        instructions="  Please address item 1 only.  ",
+    )
+    expected_p2 = (
+        "# Handoff from Rev Session (Code Reviewer)\n\n"
+        "Please address item 1 only.\n\n"
+        "---\n\n"
+        "# Output from Rev Session (Code Reviewer, turn #3)\n\n"
+        "Review findings here"
+    )
+    assert p2 == expected_p2
+
+
+def test_pipeline_start_from_later_stage_and_rework_to_skipped_implementer(
+    db: Database,
+    session_manager: SessionManager,
+    pipeline_engine: PipelineEngine,
+    workspace_dir: Path,
+) -> None:
+    async def _run() -> None:
+        roles = _create_four_role_sessions(db, workspace_dir)
+        pipeline = db.create_pipeline(
+            name="4-Stage Handoff Pipeline",
+            description="Design -> Plan -> Implement -> Review",
+            max_review_loops=2,
+            stages=[
+                {"name": "Design", "session_id": roles["designer"]["id"], "require_approval": False},
+                {"name": "Plan", "session_id": roles["planner"]["id"], "require_approval": False},
+                {"name": "Implement", "session_id": roles["implementer"]["id"], "require_approval": False},
+                {"name": "Review", "session_id": roles["reviewer"]["id"], "require_approval": False},
+            ],
+        )
+
+        # 1. Start at stage 2 (Implement) with initial_input and empty task_prompt
+        started1 = await pipeline_engine.start_pipeline_run(
+            pipeline["id"],
+            task_prompt="",
+            start_stage_index=2,
+            initial_input="Plan step 1: create module.py",
+        )
+        run1_id = started1["run"]["id"]
+        assert started1["run"]["start_stage_index"] == 2
+        final1 = await _wait_for_run_status(
+            db, run1_id, {PipelineRunStatus.COMPLETED.value, PipelineRunStatus.FAILED.value}
+        )
+        assert final1["status"] == PipelineRunStatus.COMPLETED.value
+        assert final1["start_stage_index"] == 2
+        assert final1["task_prompt"] == "(No original task given — continue from the input below.)"
+
+        sr1 = db.list_stage_runs(run1_id)
+        # Only stages 2 (Implement) and 3 (Review) executed
+        assert [s["stage_order"] for s in sr1] == [2, 3]
+        assert "# Output from Previous Stage (Provided input — User)" in sr1[0]["input_prompt"]
+        assert "Plan step 1: create module.py" in sr1[0]["input_prompt"]
+        assert "# Your Instructions for Stage 3 (Implement)" in sr1[0]["input_prompt"]
+        assert "(No original task given — continue from the input below.)" in sr1[0]["input_prompt"]
+
+        # 2. Start at stage 2 (Implement) from initial_input_turn_id (empty task_prompt inherits source turn prompt)
+        roles2 = _create_four_role_sessions(db, workspace_dir)
+        pipeline2 = db.create_pipeline(
+            name="Turn Input Pipeline",
+            description="",
+            max_review_loops=2,
+            stages=[
+                {"name": "Design", "session_id": roles2["designer"]["id"], "require_approval": False},
+                {"name": "Plan", "session_id": roles2["planner"]["id"], "require_approval": False},
+                {"name": "Implement", "session_id": roles2["implementer"]["id"], "require_approval": False},
+                {"name": "Review", "session_id": roles2["reviewer"]["id"], "require_approval": False},
+            ],
+        )
+        source_turn = await session_manager.run_turn_and_wait(
+            session_id=roles2["planner"]["id"],
+            prompt="Original planner task prompt",
+        )
+        assert source_turn["status"] == "completed"
+
+        started2 = await pipeline_engine.start_pipeline_run(
+            pipeline2["id"],
+            task_prompt="",
+            start_stage_index=2,
+            initial_input_turn_id=source_turn["id"],
+        )
+        run2_id = started2["run"]["id"]
+        final2 = await _wait_for_run_status(
+            db, run2_id, {PipelineRunStatus.COMPLETED.value, PipelineRunStatus.FAILED.value}
+        )
+        assert final2["status"] == PipelineRunStatus.COMPLETED.value
+        assert final2["start_stage_index"] == 2
+        assert final2["task_prompt"] == "Original planner task prompt"
+
+        sr2 = db.list_stage_runs(run2_id)
+        assert [s["stage_order"] for s in sr2] == [2, 3]
+        assert "# Output from Previous Stage (Planner — Planner)" in sr2[0]["input_prompt"]
+        assert source_turn["response_text"] in sr2[0]["input_prompt"]
+        assert "Original planner task prompt" in sr2[0]["input_prompt"]
+
+        # 3. Reviewer as start stage (stage 3) with [CHANGES_REQUESTED] loops back to skipped Implementer (stage 2)
+        roles3 = _create_four_role_sessions(db, workspace_dir)
+        pipeline3 = db.create_pipeline(
+            name="Skipped Implementer Rework Pipeline",
+            description="",
+            max_review_loops=2,
+            stages=[
+                {"name": "Design", "session_id": roles3["designer"]["id"], "require_approval": False},
+                {"name": "Plan", "session_id": roles3["planner"]["id"], "require_approval": False},
+                {"name": "Implement", "session_id": roles3["implementer"]["id"], "require_approval": False},
+                {"name": "Review", "session_id": roles3["reviewer"]["id"], "require_approval": False},
+            ],
+        )
+        started3 = await pipeline_engine.start_pipeline_run(
+            pipeline3["id"],
+            task_prompt="Review this with [CHANGES_REQUESTED]",
+            start_stage_index=3,
+            initial_input="Implementation summary with [CHANGES_REQUESTED]",
+        )
+        run3_id = started3["run"]["id"]
+        final3 = await _wait_for_run_status(
+            db, run3_id, {PipelineRunStatus.COMPLETED.value, PipelineRunStatus.FAILED.value}
+        )
+        assert final3["status"] == PipelineRunStatus.COMPLETED.value
+        assert final3["start_stage_index"] == 3
+        assert final3["review_loop_count"] == 1
+
+        sr3 = db.list_stage_runs(run3_id)
+        # Stage 3 (iter 0: CHANGES_REQUESTED) -> Stage 2 (iter 1: rework) -> Stage 3 (iter 1: APPROVED)
+        assert [(s["stage_order"], s["iteration"], s["status"]) for s in sr3] == [
+            (3, 0, StageRunStatus.CHANGES_REQUESTED.value),
+            (2, 1, StageRunStatus.COMPLETED.value),
+            (3, 1, StageRunStatus.COMPLETED.value),
+        ]
+
+        # 4. Validation errors (422 UnprocessableError and 404 NotFoundError)
+        with pytest.raises(UnprocessableError):
+            await pipeline_engine.start_pipeline_run(
+                pipeline["id"], task_prompt="Task", start_stage_index=-1
+            )
+        with pytest.raises(UnprocessableError):
+            await pipeline_engine.start_pipeline_run(
+                pipeline["id"], task_prompt="Task", start_stage_index=4, initial_input="x"
+            )
+        with pytest.raises(UnprocessableError):
+            await pipeline_engine.start_pipeline_run(
+                pipeline["id"], task_prompt="Task", start_stage_index=0, initial_input="not allowed"
+            )
+        with pytest.raises(UnprocessableError):
+            await pipeline_engine.start_pipeline_run(
+                pipeline["id"], task_prompt="   ", start_stage_index=0
+            )
+        with pytest.raises(UnprocessableError):
+            await pipeline_engine.start_pipeline_run(
+                pipeline["id"], task_prompt="Task", start_stage_index=1
+            )
+        with pytest.raises(UnprocessableError):
+            await pipeline_engine.start_pipeline_run(
+                pipeline["id"],
+                task_prompt="Task",
+                start_stage_index=1,
+                initial_input="both",
+                initial_input_turn_id=source_turn["id"],
+            )
+        with pytest.raises(NotFoundError):
+            await pipeline_engine.start_pipeline_run(
+                pipeline["id"],
+                task_prompt="Task",
+                start_stage_index=1,
+                initial_input_turn_id="nonexistent-turn-id",
+            )
+
+    asyncio.run(_run())
+
+
+def test_db_migration_adds_start_stage_index_on_old_schema(tmp_path: Path) -> None:
+    old_db_path = tmp_path / "legacy_state.db"
+    conn = sqlite3.connect(str(old_db_path))
+    conn.executescript(
+        """
+        CREATE TABLE pipelines (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            max_review_loops INTEGER NOT NULL DEFAULT 2,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE pipeline_runs (
+            id TEXT PRIMARY KEY,
+            pipeline_id TEXT NOT NULL REFERENCES pipelines(id) ON DELETE CASCADE,
+            pipeline_name TEXT NOT NULL,
+            task_prompt TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'completed',
+            current_stage_order INTEGER NOT NULL DEFAULT 0,
+            review_loop_count INTEGER NOT NULL DEFAULT 0,
+            max_review_loops INTEGER NOT NULL DEFAULT 2,
+            error_message TEXT,
+            started_at TEXT NOT NULL,
+            finished_at TEXT,
+            duration_ms INTEGER
+        );
+        INSERT INTO pipelines VALUES ('p-old', 'Legacy Pipe', '', 2, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+        INSERT INTO pipeline_runs VALUES (
+            'run-old', 'p-old', 'Legacy Pipe', 'Old task', 'completed', 0, 0, 2, NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:01:00Z', 60000
+        );
+        """
+    )
+    conn.close()
+
+    # Initializing Database should migrate pipeline_runs and default start_stage_index to 0
+    migrated_db = Database(old_db_path)
+    old_run = migrated_db.get_pipeline_run("run-old")
+    assert old_run is not None
+    assert old_run["start_stage_index"] == 0

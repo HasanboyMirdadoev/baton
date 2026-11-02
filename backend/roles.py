@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict, Optional, Union
 from backend.models import PermissionLevel, RoleId
 
 
@@ -82,6 +82,18 @@ ROLE_DEFINITIONS: Dict[RoleId, RoleDefinition] = {
         system_prompt="",
     ),
 }
+
+
+def get_role_label(role: Union[RoleId, str]) -> str:
+    """Returns the human-readable label for a role ID (e.g. 'Code Reviewer' for 'reviewer')."""
+    try:
+        role_enum = role if isinstance(role, RoleId) else RoleId(str(role))
+        role_def = ROLE_DEFINITIONS.get(role_enum)
+        if role_def is not None:
+            return role_def.name
+    except ValueError:
+        pass
+    return str(role)
 
 
 def resolve_system_prompt(role: RoleId, custom_prompt: Optional[str] = None) -> str:

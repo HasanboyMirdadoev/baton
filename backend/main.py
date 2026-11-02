@@ -17,18 +17,26 @@ from backend.models import (
     ApprovePipelineRunRequest,
     ConflictError,
     CreateSessionRequest,
+    ForwardTurnRequest,
     NotFoundError,
     PermissionLevel,
     SavePipelineRequest,
+    SessionStatus,
     StartPipelineRunRequest,
     StartTurnRequest,
+    TurnStatus,
+    UnprocessableError,
     UpdateSessionRequest,
     ValidationError,
 )
-from backend.pipeline_engine import PipelineEngine, validate_pipeline_stages
+from backend.pipeline_engine import (
+    PipelineEngine,
+    build_forward_prompt,
+    validate_pipeline_stages,
+)
 from backend.providers import list_providers_metadata
 from backend.pubsub import EventBus
-from backend.roles import ROLE_DEFINITIONS
+from backend.roles import ROLE_DEFINITIONS, get_role_label
 from backend.session_manager import SessionManager
 
 # --- Exception Handlers ---
@@ -39,6 +47,10 @@ async def not_found_handler(request: Request, exc: Exception) -> JSONResponse:
 
 async def conflict_handler(request: Request, exc: Exception) -> JSONResponse:
     return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+async def unprocessable_handler(request: Request, exc: Exception) -> JSONResponse:
+    return JSONResponse(status_code=422, content={"detail": str(exc)})
 
 
 async def validation_handler(request: Request, exc: Exception) -> JSONResponse:
@@ -289,6 +301,66 @@ async def get_turn(request: Request, turn_id: str) -> Dict[str, Any]:
     return {"turn": turn, "events": events}
 
 
+@api_router.post(
+    "/api/turns/{turn_id}/forward", status_code=status.HTTP_202_ACCEPTED
+)
+async def forward_turn(
+    request: Request, turn_id: str, req: ForwardTurnRequest
+) -> Dict[str, Any]:
+    db = get_db(request)
+    sm = get_session_manager(request)
+
+    source_turn = db.get_turn(turn_id)
+    if source_turn is None:
+        raise NotFoundError(f"Turn {turn_id} not found")
+
+    target_session = db.get_session(req.target_session_id)
+    if target_session is None:
+        raise NotFoundError(f"Session {req.target_session_id} not found")
+
+    if req.target_session_id == source_turn.get("session_id"):
+        raise UnprocessableError("Cannot forward a turn to the same session")
+
+    if source_turn.get("status") != TurnStatus.COMPLETED.value:
+        raise UnprocessableError(
+            f"Source turn {turn_id} is not completed (status={source_turn.get('status')})"
+        )
+
+    response_text = source_turn.get("response_text") or ""
+    if not response_text.strip():
+        raise UnprocessableError(f"Source turn {turn_id} has empty response_text")
+
+    if (
+        sm.is_session_running(req.target_session_id)
+        or target_session.get("status") == SessionStatus.RUNNING.value
+    ):
+        raise ConflictError(
+            f"Session {req.target_session_id} is currently running a turn"
+        )
+
+    source_session_name = source_turn.get("session_name") or "Unknown Session"
+    source_role_label = get_role_label(source_turn.get("role") or "")
+    prompt = build_forward_prompt(
+        source_session_name=source_session_name,
+        source_role_label=source_role_label,
+        turn_number=int(source_turn["turn_number"]),
+        response_text=response_text,
+        instructions=req.instructions,
+    )
+
+    new_turn_id = await sm.start_turn(
+        session_id=req.target_session_id,
+        prompt=prompt,
+    )
+    new_turn = db.get_turn(new_turn_id)
+    return {
+        "turn_id": new_turn_id,
+        "session_id": req.target_session_id,
+        "turn_number": new_turn["turn_number"] if new_turn else 1,
+        "status": new_turn["status"] if new_turn else "running",
+    }
+
+
 @api_router.get("/api/pipelines")
 async def list_pipelines(request: Request) -> Dict[str, Any]:
     db = get_db(request)
@@ -359,7 +431,13 @@ async def start_pipeline_run(
     request: Request, pipeline_id: str, req: StartPipelineRunRequest
 ) -> Dict[str, Any]:
     pe = get_pipeline_engine(request)
-    result = await pe.start_pipeline_run(pipeline_id, req.task_prompt)
+    result = await pe.start_pipeline_run(
+        pipeline_id=pipeline_id,
+        task_prompt=req.task_prompt or "",
+        start_stage_index=req.start_stage_index,
+        initial_input=req.initial_input,
+        initial_input_turn_id=req.initial_input_turn_id,
+    )
     return result
 
 
@@ -454,6 +532,7 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
 
     app.add_exception_handler(NotFoundError, not_found_handler)
     app.add_exception_handler(ConflictError, conflict_handler)
+    app.add_exception_handler(UnprocessableError, unprocessable_handler)
     app.add_exception_handler(ValidationError, validation_handler)
     app.add_exception_handler(ValueError, value_error_handler)
 

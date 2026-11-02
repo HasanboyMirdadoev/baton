@@ -5,6 +5,8 @@ import time
 
 from fastapi.testclient import TestClient
 
+from backend.db import Database
+
 
 def _poll_until(predicate, timeout_sec: float = 10.0) -> None:
     deadline = time.monotonic() + timeout_sec
@@ -18,7 +20,7 @@ def _poll_until(predicate, timeout_sec: float = 10.0) -> None:
 def test_root_html_and_meta_endpoint(client: TestClient) -> None:
     res_html = client.get("/")
     assert res_html.status_code == 200
-    assert "Agent Relay" in res_html.text
+    assert "Baton" in res_html.text or "Agent Relay" in res_html.text
 
     res_meta = client.get("/api/meta")
     assert res_meta.status_code == 200
@@ -265,3 +267,274 @@ def test_pipelines_and_runs_api_lifecycle(
     del_pipe = client.delete(f"/api/pipelines/{pipeline_id}")
     assert del_pipe.status_code == 200
     assert del_pipe.json()["deleted"] is True
+
+
+def test_forward_turn_api_happy_path_and_errors(
+    client: TestClient, db: Database, workspace_dir: Path
+) -> None:
+    designer_sess = client.post(
+        "/api/sessions",
+        json={
+            "name": "Arch Designer",
+            "provider": "antigravity",
+            "model": "gemini-4-argon-high",
+            "role": "designer",
+            "working_dir": str(workspace_dir),
+        },
+    ).json()
+    planner_sess = client.post(
+        "/api/sessions",
+        json={
+            "name": "Lead Planner",
+            "provider": "claude",
+            "model": "sonnet",
+            "role": "planner",
+            "working_dir": str(workspace_dir),
+        },
+    ).json()
+
+    # Run a turn on designer_sess and wait for completion
+    t1_res = client.post(
+        f"/api/sessions/{designer_sess['id']}/turns",
+        json={"prompt": "Create the system architecture"},
+    )
+    assert t1_res.status_code == 202
+    t1_id = t1_res.json()["turn_id"]
+
+    _poll_until(
+        lambda: client.get(f"/api/turns/{t1_id}").json()["turn"]["status"] == "completed"
+    )
+    t1_detail = client.get(f"/api/turns/{t1_id}").json()["turn"]
+
+    # 1. 404 on unknown turn or unknown target session
+    assert (
+        client.post(
+            "/api/turns/unknown-turn-id/forward",
+            json={"target_session_id": planner_sess["id"]},
+        ).status_code
+        == 404
+    )
+    assert (
+        client.post(
+            f"/api/turns/{t1_id}/forward",
+            json={"target_session_id": "unknown-session-id"},
+        ).status_code
+        == 404
+    )
+
+    # 2. 422 when forwarding to the same session
+    same_sess_res = client.post(
+        f"/api/turns/{t1_id}/forward",
+        json={"target_session_id": designer_sess["id"]},
+    )
+    assert same_sess_res.status_code == 422
+
+    # 3. Happy path forward (default instructions when omitted/empty)
+    fwd_res = client.post(
+        f"/api/turns/{t1_id}/forward",
+        json={"target_session_id": planner_sess["id"]},
+    )
+    assert fwd_res.status_code == 202
+    fwd_body = fwd_res.json()
+    assert set(fwd_body.keys()) == {"turn_id", "session_id", "turn_number", "status"}
+    assert fwd_body["session_id"] == planner_sess["id"]
+    assert fwd_body["turn_number"] == 1
+    fwd_turn_id = fwd_body["turn_id"]
+
+    _poll_until(
+        lambda: client.get(f"/api/turns/{fwd_turn_id}").json()["turn"]["status"]
+        == "completed"
+    )
+    fwd_turn = client.get(f"/api/turns/{fwd_turn_id}").json()["turn"]
+    expected_prompt = (
+        "# Handoff from Arch Designer (Designer)\n\n"
+        "Proceed with your role using the output below.\n\n"
+        "---\n\n"
+        "# Output from Arch Designer (Designer, turn #1)\n\n"
+        f"{t1_detail['response_text']}"
+    )
+    assert fwd_turn["prompt"] == expected_prompt
+
+    # 4. Forward with custom instructions
+    fwd2_res = client.post(
+        f"/api/turns/{t1_id}/forward",
+        json={
+            "target_session_id": planner_sess["id"],
+            "instructions": "Break this into 3 milestones.",
+        },
+    )
+    assert fwd2_res.status_code == 202
+    fwd2_turn_id = fwd2_res.json()["turn_id"]
+    _poll_until(
+        lambda: client.get(f"/api/turns/{fwd2_turn_id}").json()["turn"]["status"]
+        == "completed"
+    )
+    fwd2_turn = client.get(f"/api/turns/{fwd2_turn_id}").json()["turn"]
+    assert "Break this into 3 milestones." in fwd2_turn["prompt"]
+
+    # 5. 409 when target session is busy, and 422 when source turn is incomplete
+    slow_res = client.post(
+        f"/api/sessions/{planner_sess['id']}/turns",
+        json={"prompt": "Long running task [SLOW]"},
+    )
+    assert slow_res.status_code == 202
+    slow_turn_id = slow_res.json()["turn_id"]
+
+    # Forwarding completed t1_id to busy planner_sess -> 409
+    busy_target_res = client.post(
+        f"/api/turns/{t1_id}/forward",
+        json={"target_session_id": planner_sess["id"]},
+    )
+    assert busy_target_res.status_code == 409
+
+    # Forwarding incomplete slow_turn_id to idle designer_sess -> 422
+    incomplete_src_res = client.post(
+        f"/api/turns/{slow_turn_id}/forward",
+        json={"target_session_id": designer_sess["id"]},
+    )
+    assert incomplete_src_res.status_code == 422
+
+    # Stop the slow turn; stopped turn also returns 422 when forwarded
+    client.post(f"/api/sessions/{planner_sess['id']}/stop")
+    stopped_src_res = client.post(
+        f"/api/turns/{slow_turn_id}/forward",
+        json={"target_session_id": designer_sess["id"]},
+    )
+    assert stopped_src_res.status_code == 422
+
+    # Completed turn with empty response_text returns 422
+    empty_turn = db.create_turn(
+        session_id=designer_sess["id"], prompt="Empty reply test"
+    )
+    db.update_turn(empty_turn["id"], status="completed", response_text="   ")
+    db.update_session(designer_sess["id"], status="idle")
+    empty_src_res = client.post(
+        f"/api/turns/{empty_turn['id']}/forward",
+        json={"target_session_id": planner_sess["id"]},
+    )
+    assert empty_src_res.status_code == 422
+
+
+def test_pipeline_run_start_stage_api_and_validation(
+    client: TestClient, workspace_dir: Path
+) -> None:
+    des_s = client.post(
+        "/api/sessions",
+        json={
+            "name": "Des",
+            "provider": "antigravity",
+            "model": "gemini-4-argon-high",
+            "role": "designer",
+            "working_dir": str(workspace_dir),
+        },
+    ).json()
+    plan_s = client.post(
+        "/api/sessions",
+        json={
+            "name": "Plan",
+            "provider": "claude",
+            "model": "sonnet",
+            "role": "planner",
+            "working_dir": str(workspace_dir),
+        },
+    ).json()
+    imp_s = client.post(
+        "/api/sessions",
+        json={
+            "name": "Imp",
+            "provider": "antigravity",
+            "model": "gemini-4-argon-high",
+            "role": "implementer",
+            "working_dir": str(workspace_dir),
+        },
+    ).json()
+    rev_s = client.post(
+        "/api/sessions",
+        json={
+            "name": "Rev",
+            "provider": "claude",
+            "model": "sonnet",
+            "role": "reviewer",
+            "working_dir": str(workspace_dir),
+        },
+    ).json()
+
+    pipe = client.post(
+        "/api/pipelines",
+        json={
+            "name": "4-Stage Pipe",
+            "description": "",
+            "max_review_loops": 2,
+            "stages": [
+                {"name": "Design", "session_id": des_s["id"], "require_approval": False},
+                {"name": "Plan", "session_id": plan_s["id"], "require_approval": False},
+                {"name": "Implement", "session_id": imp_s["id"], "require_approval": False},
+                {"name": "Review", "session_id": rev_s["id"], "require_approval": False},
+            ],
+        },
+    ).json()
+    pipe_id = pipe["id"]
+
+    # Validation errors -> 422 / 404
+    assert (
+        client.post(
+            f"/api/pipelines/{pipe_id}/runs",
+            json={"task_prompt": ""},
+        ).status_code
+        == 422
+    )
+    assert (
+        client.post(
+            f"/api/pipelines/{pipe_id}/runs",
+            json={"task_prompt": "ok", "start_stage_index": 0, "initial_input": "bad"},
+        ).status_code
+        == 422
+    )
+    assert (
+        client.post(
+            f"/api/pipelines/{pipe_id}/runs",
+            json={"task_prompt": "ok", "start_stage_index": 10, "initial_input": "x"},
+        ).status_code
+        == 422
+    )
+    assert (
+        client.post(
+            f"/api/pipelines/{pipe_id}/runs",
+            json={"task_prompt": "ok", "start_stage_index": 2},
+        ).status_code
+        == 422
+    )
+    assert (
+        client.post(
+            f"/api/pipelines/{pipe_id}/runs",
+            json={
+                "task_prompt": "ok",
+                "start_stage_index": 2,
+                "initial_input_turn_id": "missing-turn",
+            },
+        ).status_code
+        == 404
+    )
+
+    # Start at stage 2 via API with initial_input
+    run_res = client.post(
+        f"/api/pipelines/{pipe_id}/runs",
+        json={
+            "task_prompt": "",
+            "start_stage_index": 2,
+            "initial_input": "Implement feature X directly",
+            "initial_input_turn_id": None,
+        },
+    )
+    assert run_res.status_code == 202
+    run_id = run_res.json()["run"]["id"]
+    assert run_res.json()["run"]["start_stage_index"] == 2
+
+    _poll_until(
+        lambda: client.get(f"/api/pipeline-runs/{run_id}").json()["run"]["status"]
+        in ("completed", "failed")
+    )
+    detail = client.get(f"/api/pipeline-runs/{run_id}").json()
+    assert detail["run"]["status"] == "completed"
+    assert detail["run"]["start_stage_index"] == 2
+    assert [sr["stage_order"] for sr in detail["stage_runs"]] == [2, 3]

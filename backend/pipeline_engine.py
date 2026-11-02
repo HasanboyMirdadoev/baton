@@ -15,10 +15,12 @@ from backend.models import (
     SessionStatus,
     StageRunStatus,
     TurnStatus,
+    UnprocessableError,
     ValidationError,
     utc_now_iso,
 )
 from backend.pubsub import EventBus
+from backend.roles import get_role_label
 from backend.session_manager import SessionManager
 
 
@@ -172,6 +174,31 @@ def build_handoff_prompt(
     raise ValueError(f"Unknown handoff prompt case: {case!r}")
 
 
+def build_forward_prompt(
+    source_session_name: str,
+    source_role_label: str,
+    turn_number: int,
+    response_text: str,
+    instructions: Optional[str] = None,
+) -> str:
+    """
+    Constructs the handoff prompt for forwarding a finished turn to another session.
+    """
+    role_label = get_role_label(source_role_label)
+    effective_instructions = (
+        instructions.strip()
+        if (instructions and instructions.strip())
+        else "Proceed with your role using the output below."
+    )
+    return (
+        f"# Handoff from {source_session_name} ({role_label})\n\n"
+        f"{effective_instructions}\n\n"
+        f"---\n\n"
+        f"# Output from {source_session_name} ({role_label}, turn #{turn_number})\n\n"
+        f"{response_text}"
+    )
+
+
 class PipelineEngine:
     def __init__(
         self, db: Database, session_manager: SessionManager, bus: EventBus
@@ -190,7 +217,12 @@ class PipelineEngine:
         validate_pipeline_stages(self.db, stages)
 
     async def start_pipeline_run(
-        self, pipeline_id: str, task_prompt: str
+        self,
+        pipeline_id: str,
+        task_prompt: str = "",
+        start_stage_index: int = 0,
+        initial_input: Optional[str] = None,
+        initial_input_turn_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Creates a pipeline_run record, launches background execution task, returns run detail dict."""
         pipeline = self.db.get_pipeline(pipeline_id)
@@ -199,6 +231,83 @@ class PipelineEngine:
 
         stages: List[Dict[str, Any]] = pipeline.get("stages") or []
         validate_pipeline_stages(self.db, stages)
+
+        if start_stage_index < 0 or start_stage_index >= len(stages):
+            raise UnprocessableError(
+                f"start_stage_index {start_stage_index} is out of range for pipeline with {len(stages)} stage(s)"
+            )
+
+        init_prev_stage_name = ""
+        init_prev_session_role = ""
+        init_prev_stage_output = ""
+
+        if start_stage_index == 0:
+            if initial_input is not None or initial_input_turn_id is not None:
+                raise UnprocessableError(
+                    "initial_input and initial_input_turn_id must be null when start_stage_index is 0"
+                )
+            if not task_prompt or not task_prompt.strip():
+                raise UnprocessableError(
+                    "task_prompt is required when start_stage_index is 0"
+                )
+            effective_task_prompt = task_prompt
+        else:
+            has_initial_input = initial_input is not None
+            has_turn_id = initial_input_turn_id is not None
+            if has_initial_input == has_turn_id:
+                raise UnprocessableError(
+                    "When start_stage_index > 0, exactly one of initial_input or initial_input_turn_id is required"
+                )
+
+            if has_initial_input:
+                assert initial_input is not None
+                if not initial_input.strip():
+                    raise UnprocessableError(
+                        "initial_input must be non-empty when provided"
+                    )
+                init_prev_stage_name = "Provided input"
+                init_prev_session_role = "User"
+                init_prev_stage_output = initial_input
+                if task_prompt and task_prompt.strip():
+                    effective_task_prompt = task_prompt
+                else:
+                    effective_task_prompt = (
+                        "(No original task given — continue from the input below.)"
+                    )
+            else:
+                assert initial_input_turn_id is not None
+                if not initial_input_turn_id.strip():
+                    raise UnprocessableError(
+                        "initial_input_turn_id must be non-empty when provided"
+                    )
+                source_turn = self.db.get_turn(initial_input_turn_id)
+                if source_turn is None:
+                    raise NotFoundError(f"Turn {initial_input_turn_id} not found")
+                if source_turn.get("status") != TurnStatus.COMPLETED.value:
+                    raise UnprocessableError(
+                        f"Source turn {initial_input_turn_id} is not completed (status={source_turn.get('status')})"
+                    )
+                source_output = source_turn.get("response_text") or ""
+                if not source_output.strip():
+                    raise UnprocessableError(
+                        f"Source turn {initial_input_turn_id} has empty response_text"
+                    )
+                init_prev_stage_name = (
+                    source_turn.get("session_name") or "Previous Session"
+                )
+                init_prev_session_role = get_role_label(
+                    source_turn.get("role") or ""
+                )
+                init_prev_stage_output = source_output
+                if task_prompt and task_prompt.strip():
+                    effective_task_prompt = task_prompt
+                else:
+                    source_prompt = source_turn.get("prompt") or ""
+                    effective_task_prompt = (
+                        source_prompt
+                        if source_prompt.strip()
+                        else "(No original task given — continue from the input below.)"
+                    )
 
         if self.db.has_active_pipeline_runs(pipeline_id):
             raise ConflictError(
@@ -222,15 +331,25 @@ class PipelineEngine:
         run = self.db.create_pipeline_run(
             pipeline_id=pipeline_id,
             pipeline_name=pipeline["name"],
-            task_prompt=task_prompt,
+            task_prompt=effective_task_prompt,
             max_review_loops=int(pipeline.get("max_review_loops", 2)),
             status=PipelineRunStatus.RUNNING.value,
+            start_stage_index=start_stage_index,
         )
         run_id: str = run["id"]
 
         await self.bus.publish("pipeline_run_updated", {"run": run})
 
-        task = asyncio.create_task(self._run_pipeline_loop(run_id, pipeline))
+        task = asyncio.create_task(
+            self._run_pipeline_loop(
+                run_id,
+                pipeline,
+                start_stage_index=start_stage_index,
+                init_prev_stage_name=init_prev_stage_name,
+                init_prev_session_role=init_prev_session_role,
+                init_prev_stage_output=init_prev_stage_output,
+            )
+        )
         self._active_run_tasks[run_id] = task
 
         return {"run": run, "stage_runs": []}
@@ -436,7 +555,13 @@ class PipelineEngine:
         return stage_run, turn, True
 
     async def _run_pipeline_loop(
-        self, run_id: str, pipeline: Dict[str, Any]
+        self,
+        run_id: str,
+        pipeline: Dict[str, Any],
+        start_stage_index: int = 0,
+        init_prev_stage_name: str = "",
+        init_prev_session_role: str = "",
+        init_prev_stage_output: str = "",
     ) -> None:
         run_start_monotonic = time.monotonic()
         run = self.db.get_pipeline_run(run_id)
@@ -449,12 +574,15 @@ class PipelineEngine:
         review_loop_count = 0
         pending_approval_note: Optional[str] = None
 
-        prev_stage_name = ""
-        prev_session_role = ""
-        prev_stage_output = ""
+        prev_stage_name = init_prev_stage_name
+        prev_session_role = init_prev_session_role
+        prev_stage_output = init_prev_stage_output
 
         try:
             for idx, stage in enumerate(stages):
+                if idx < start_stage_index:
+                    continue
+
                 if run_id in self._stopped_runs:
                     await self._mark_run_stopped(run_id, run_start_monotonic)
                     return

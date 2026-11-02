@@ -28,6 +28,11 @@ class ValidationError(Exception):
     pass
 
 
+class UnprocessableError(ValidationError):
+    """Semantic validation failure (mapped to 422 Unprocessable Entity)."""
+    pass
+
+
 # --- Enums ---
 
 class ProviderId(str, Enum):
@@ -134,6 +139,11 @@ class StartTurnRequest(BaseModel):
     timeout_sec: Optional[int] = Field(default=None, ge=1, le=7200)
 
 
+class ForwardTurnRequest(BaseModel):
+    target_session_id: str = Field(..., min_length=1)
+    instructions: Optional[str] = None
+
+
 class PipelineStageInput(BaseModel):
     name: str = Field(..., min_length=1)
     session_id: str = Field(..., min_length=1)
@@ -148,7 +158,10 @@ class SavePipelineRequest(BaseModel):
 
 
 class StartPipelineRunRequest(BaseModel):
-    task_prompt: str = Field(..., min_length=1)
+    task_prompt: Optional[str] = ""
+    start_stage_index: int = 0
+    initial_input: Optional[str] = None
+    initial_input_turn_id: Optional[str] = None
 
 
 class ApprovePipelineRunRequest(BaseModel):
