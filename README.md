@@ -1,8 +1,14 @@
-# Agent Relay
+# Baton
 
-Agent Relay is a local, single-user macOS web application for managing multi-turn AI coding sessions across **Claude Code (`claude`)** and **Antigravity (`agy`)** CLIs, assigning specialized engineering roles with enforced tool permissions, and orchestrating multi-stage pipelines with automated code-review rework loops.
+Baton — pass work between AI sessions like a relay baton.
+Repo: [github.com/HasanboyMirdadoev/baton](https://github.com/HasanboyMirdadoev/baton)
+
+Baton is a local, single-user macOS web application for managing multi-turn AI coding sessions across **Claude Code (`claude`)** and **Antigravity (`agy`)** CLIs, assigning specialized engineering roles with enforced tool permissions, and orchestrating multi-stage pipelines with automated code-review rework loops.
 
 All model interactions occur through locally installed, already-authenticated CLI binaries executed as non-interactive streaming subprocesses (`stream-json`). No API keys or external cloud relays are used.
+
+> [!NOTE]
+> **Backward Compatibility**: For backward compatibility, the local data directory (`~/.agent-relay`), environment variables (`AGENT_RELAY_*`), and the repository folder retain their original names.
 
 ---
 
@@ -27,7 +33,7 @@ All model interactions occur through locally installed, already-authenticated CL
    pip install -r requirements.txt
    ```
 
-3. **Start Agent Relay**:
+3. **Start Baton**:
    ```bash
    python -m uvicorn backend.main:app --host 127.0.0.1 --port 8765
    ```
@@ -39,11 +45,11 @@ All model interactions occur through locally installed, already-authenticated CL
 
 ## Configuration & Environment Variables
 
-Agent Relay runs on `127.0.0.1` by default and validates environment variables at startup:
+Baton runs on `127.0.0.1` by default and validates environment variables at startup:
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
-| `AGENT_RELAY_HOME` | `~/.agent-relay` | Root data directory for SQLite database (`state.db`) and turn stream event logs (`turns/`). Directory permissions are enforced as `0o700`. |
+| `AGENT_RELAY_HOME` | `~/.agent-relay` | Root data directory for SQLite database (`state.db`) and turn stream event logs (`turns/`). Directory permissions are enforced as `0o700`. (Keeps legacy name for compatibility). |
 | `AGENT_RELAY_PORT` | `8765` | Server port on `127.0.0.1`. Blocked system/Apple ports (`5000`, `7000`, `5090`, `5186`) are rejected at startup. |
 | `CLAUDE_BIN` | `claude` | Path or binary name for Claude Code CLI. Resolved via `~/.local/bin/claude` or `PATH`. |
 | `AGY_BIN` | `agy` | Path or binary name for Antigravity CLI. Resolved via `~/.local/bin/agy` or `PATH`. |
@@ -88,7 +94,7 @@ Pipelines orchestrate multi-stage workflows across sessions (for example: **Desi
 
 ## Running Tests
 
-Agent Relay includes an automated test suite using deterministic fake CLI fixtures with zero real model or network calls:
+Baton includes an automated test suite using deterministic fake CLI fixtures with zero real model or network calls:
 
 ```bash
 .venv/bin/pytest -v
