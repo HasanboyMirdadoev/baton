@@ -24,7 +24,15 @@ async function request(url, options = {}) {
     try {
       const data = await res.json();
       if (data && data.detail) {
-        detail = data.detail;
+        // FastAPI request-validation errors return a list of {loc, msg} objects
+        detail = Array.isArray(data.detail)
+          ? data.detail
+              .map((d) => {
+                const loc = Array.isArray(d.loc) ? d.loc.filter((x) => x !== 'body').join('.') : '';
+                return loc ? `${loc}: ${d.msg}` : d.msg || JSON.stringify(d);
+              })
+              .join('; ')
+          : String(data.detail);
       }
     } catch (_) {
       // Body was not JSON; use statusText
@@ -183,6 +191,101 @@ export async function stopPipelineRun(runId) {
   });
 }
 
+// --- Teams & Team Runs ---
+export async function listTeams() {
+  return request('/api/teams');
+}
+
+export async function createTeam(payload) {
+  return request('/api/teams', {
+    method: 'POST',
+    body: payload,
+  });
+}
+
+export async function updateTeam(teamId, payload) {
+  return request(`/api/teams/${encodeURIComponent(teamId)}`, {
+    method: 'PUT',
+    body: payload,
+  });
+}
+
+export async function deleteTeam(teamId) {
+  return request(`/api/teams/${encodeURIComponent(teamId)}`, {
+    method: 'DELETE',
+  });
+}
+
+export async function startTeamRun(teamIdOrPayload, maybePayload) {
+  let teamId = null;
+  let payload = {};
+  if (typeof teamIdOrPayload === 'string') {
+    teamId = teamIdOrPayload;
+    payload = maybePayload || {};
+  } else if (teamIdOrPayload && typeof teamIdOrPayload === 'object') {
+    payload = { ...teamIdOrPayload };
+    if (payload.team_id) {
+      teamId = payload.team_id;
+    }
+  }
+  const url = teamId
+    ? `/api/teams/${encodeURIComponent(teamId)}/runs`
+    : '/api/team-runs';
+  return request(url, {
+    method: 'POST',
+    body: payload,
+  });
+}
+
+export async function listTeamRuns() {
+  return request('/api/team-runs');
+}
+
+export async function getTeamRun(runId) {
+  return request(`/api/team-runs/${encodeURIComponent(runId)}`);
+}
+
+export async function answerTeamQuestions(runId, answersOrPayload) {
+  const body = Array.isArray(answersOrPayload)
+    ? { answers: answersOrPayload }
+    : (answersOrPayload || { answers: [] });
+  return request(`/api/team-runs/${encodeURIComponent(runId)}/answer`, {
+    method: 'POST',
+    body,
+  });
+}
+
+export async function reviewTeamMockup(runId, payload) {
+  return request(`/api/team-runs/${encodeURIComponent(runId)}/mockup-review`, {
+    method: 'POST',
+    body: payload,
+  });
+}
+
+export async function getTeamRunDiff(runId) {
+  return request(`/api/team-runs/${encodeURIComponent(runId)}/diff`);
+}
+
+export async function resumeTeamRun(runId, payload = {}) {
+  return request(`/api/team-runs/${encodeURIComponent(runId)}/resume`, {
+    method: 'POST',
+    body: payload,
+  });
+}
+
+export async function signoffTeamRun(runId, payload) {
+  return request(`/api/team-runs/${encodeURIComponent(runId)}/signoff`, {
+    method: 'POST',
+    body: payload,
+  });
+}
+
+export async function stopTeamRun(runId) {
+  return request(`/api/team-runs/${encodeURIComponent(runId)}/stop`, {
+    method: 'POST',
+  });
+}
+
 // Grouped object export
 export const api = {
   getMeta,
@@ -205,6 +308,19 @@ export const api = {
   getPipelineRun,
   approvePipelineRun,
   stopPipelineRun,
+  listTeams,
+  createTeam,
+  updateTeam,
+  deleteTeam,
+  startTeamRun,
+  listTeamRuns,
+  getTeamRun,
+  answerTeamQuestions,
+  reviewTeamMockup,
+  getTeamRunDiff,
+  resumeTeamRun,
+  signoffTeamRun,
+  stopTeamRun,
 };
 
 export default api;

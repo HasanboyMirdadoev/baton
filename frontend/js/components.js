@@ -165,6 +165,12 @@ export function renderRoleBadge(roleId) {
     implementer: 'Implementer',
     reviewer: 'Code Reviewer',
     custom: 'Custom',
+    pm: 'PM',
+    ui_designer: 'UI Designer',
+    architect: 'Code Architect',
+    ui_checker: 'UI Checker',
+    user: 'User',
+    checkers: 'Checkers',
   };
   const label = labelMap[r] || escapeHtml(roleId || 'Unknown');
   return `<span class="badge-role badge-role-${escapeHtml(r)}">${label}</span>`;
@@ -207,6 +213,7 @@ export function renderStatusBadge(status) {
     idle: 'Idle',
     running: 'Running',
     waiting_approval: 'Waiting Approval',
+    waiting_user: 'Waiting on You',
     completed: 'Completed',
     changes_requested: 'Changes Requested',
     error: 'Error',
@@ -214,6 +221,8 @@ export function renderStatusBadge(status) {
     timeout: 'Timed Out',
     stopped: 'Stopped',
     pending: 'Pending',
+    paused_limit: 'Paused (Limit)',
+    interrupted: 'Interrupted',
   };
   const label = labelMap[s] || escapeHtml(status || 'Unknown');
   return `<span class="status-badge status-${escapeHtml(s)}">${renderStatusDot(s)} <span class="status-text">${label}</span></span>`;

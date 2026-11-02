@@ -22,6 +22,12 @@ import {
   renderHistoryView,
   handleRunSseEvent,
 } from './runs.js';
+import {
+  initTeamView,
+  renderTeamView,
+  updateTeamInboxBadge,
+  handleTeamSseEvent,
+} from './team.js';
 
 /**
  * Shared application reactive state store (Clarification C7.3).
@@ -67,6 +73,8 @@ export const store = {
         system_prompt: '',
       },
     ],
+    team_roles: [],
+    default_team_members: [],
     permissions: [
       { id: 'readonly', label: 'Read-Only (Plan)', description: 'Inspect files only; no edits or shell commands.' },
       { id: 'edit', label: 'Edit Files', description: 'Auto-accept file edits in workspace.' },
@@ -82,6 +90,12 @@ export const store = {
   pipelineRuns: [],
   activeRunId: null,
   activeRunDetail: null,
+  teams: [],
+  activeTeamId: null,
+  teamRuns: [],
+  activeTeamRunId: null,
+  activeTeamRunDetail: null,
+  teamRunTurns: {},
   allTurns: [],
   activeView: 'sessions',
   sseConnected: false,
@@ -126,13 +140,13 @@ async function loadAndSelectSession(sessionId) {
 }
 
 /**
- * Switches top-level workspace view ('sessions' | 'pipelines' | 'history')
- * and optionally selects a sessionId, pipelineId, or runId.
- * @param {"sessions"|"pipelines"|"history"} viewName
+ * Switches top-level workspace view ('sessions' | 'pipelines' | 'team' | 'history')
+ * and optionally selects a sessionId, pipelineId, runId, or teamRunId.
+ * @param {"sessions"|"pipelines"|"team"|"history"} viewName
  * @param {object} options
  */
 export function switchView(viewName, options = {}) {
-  const validViews = ['sessions', 'pipelines', 'history'];
+  const validViews = ['sessions', 'pipelines', 'team', 'history'];
   const targetView = validViews.includes(viewName) ? viewName : 'sessions';
   store.activeView = targetView;
 
@@ -140,6 +154,7 @@ export function switchView(viewName, options = {}) {
   const tabMap = {
     sessions: document.getElementById('nav-tab-sessions'),
     pipelines: document.getElementById('nav-tab-pipelines'),
+    team: document.getElementById('nav-tab-team'),
     history: document.getElementById('nav-tab-history'),
   };
   for (const [key, btn] of Object.entries(tabMap)) {
@@ -152,6 +167,7 @@ export function switchView(viewName, options = {}) {
   const viewPanels = {
     sessions: document.getElementById('view-sessions'),
     pipelines: document.getElementById('view-pipelines'),
+    team: document.getElementById('view-team'),
     history: document.getElementById('view-history'),
   };
   for (const [key, panel] of Object.entries(viewPanels)) {
@@ -162,6 +178,10 @@ export function switchView(viewName, options = {}) {
 
   if (options.pipelineId !== undefined) {
     store.activePipelineId = options.pipelineId;
+  }
+
+  if (options.teamRunId !== undefined) {
+    store.activeTeamRunId = options.teamRunId;
   }
 
   if (options.runId !== undefined) {
@@ -191,6 +211,8 @@ export function switchView(viewName, options = {}) {
   } else if (targetView === 'pipelines') {
     renderPipelineBuilder();
     renderActiveRunPanel();
+  } else if (targetView === 'team') {
+    renderTeamView();
   } else if (targetView === 'history') {
     refreshRuns();
     renderHistoryView();
@@ -288,6 +310,47 @@ export async function refreshRuns() {
 }
 
 /**
+ * Re-fetches all team presets from the API.
+ * @returns {Promise<Array>}
+ */
+export async function refreshTeams() {
+  try {
+    const res = await api.listTeams();
+    store.teams = (res && Array.isArray(res.teams)) ? res.teams : [];
+    if (!store.activeTeamId && store.teams.length > 0) {
+      const def = store.teams.find((t) => t.is_default) || store.teams[0];
+      store.activeTeamId = def.id;
+    }
+    if (store.activeView === 'team') {
+      renderTeamView();
+    }
+    return store.teams;
+  } catch (err) {
+    showToast(`Failed to refresh teams: ${err.message || err}`, 'error');
+    return store.teams;
+  }
+}
+
+/**
+ * Re-fetches all team runs from the API and updates the inbox badge.
+ * @returns {Promise<Array>}
+ */
+export async function refreshTeamRuns() {
+  try {
+    const res = await api.listTeamRuns();
+    store.teamRuns = (res && Array.isArray(res.runs)) ? res.runs : [];
+    updateTeamInboxBadge();
+    if (store.activeView === 'team') {
+      renderTeamView();
+    }
+    return store.teamRuns;
+  } catch (err) {
+    showToast(`Failed to refresh team runs: ${err.message || err}`, 'error');
+    return store.teamRuns;
+  }
+}
+
+/**
  * Updates the #sse-status-indicator badge in the top navigation bar.
  * @param {boolean} connected
  */
@@ -351,6 +414,9 @@ function connectEventStream() {
     'pipeline_run_updated',
     'pipeline_stage_updated',
     'pipeline_waiting_approval',
+    'team_run_updated',
+    'team_message_created',
+    'team_inbox_updated',
     'ping',
   ];
 
@@ -372,7 +438,7 @@ function connectEventStream() {
         }
       }
 
-      // Cache live turn events globally so both Session Chat and Active Pipeline Run views can read them
+      // Cache live turn events globally so Session Chat, Active Pipeline Run, and Team views can read them
       if (eventName === 'turn_started' && payload.turn && payload.turn.id) {
         if (!store.liveTurnEvents[payload.turn.id]) {
           store.liveTurnEvents[payload.turn.id] = [];
@@ -406,16 +472,23 @@ function connectEventStream() {
       } catch (err) {
         console.error('Error in handleRunSseEvent:', err);
       }
+
+      try {
+        handleTeamSseEvent(eventName, payload);
+      } catch (err) {
+        console.error('Error in handleTeamSseEvent:', err);
+      }
     });
   }
 }
 
 /**
- * Binds top navigation bar buttons (#nav-tab-sessions, #nav-tab-pipelines, #nav-tab-history).
+ * Binds top navigation bar buttons (#nav-tab-sessions, #nav-tab-pipelines, #nav-tab-team, #nav-tab-history).
  */
 function bindTopNavigation() {
   const btnSessions = document.getElementById('nav-tab-sessions');
   const btnPipelines = document.getElementById('nav-tab-pipelines');
+  const btnTeam = document.getElementById('nav-tab-team');
   const btnHistory = document.getElementById('nav-tab-history');
 
   if (btnSessions) {
@@ -423,6 +496,9 @@ function bindTopNavigation() {
   }
   if (btnPipelines) {
     btnPipelines.addEventListener('click', () => switchView('pipelines'));
+  }
+  if (btnTeam) {
+    btnTeam.addEventListener('click', () => switchView('team'));
   }
   if (btnHistory) {
     btnHistory.addEventListener('click', () => switchView('history'));
@@ -440,6 +516,8 @@ async function bootstrapApp() {
     refreshSessions,
     refreshPipelines,
     refreshRuns,
+    refreshTeams,
+    refreshTeamRuns,
     selectSession: loadAndSelectSession,
     openNewSessionModal,
     renderSessionsSidebar,
@@ -447,20 +525,24 @@ async function bootstrapApp() {
     renderPipelineBuilder,
     renderActiveRunPanel,
     renderHistoryView,
+    renderTeamView,
   };
 
   initSessionsView(store, callbacks);
   initPipelinesView(store, callbacks);
   initRunsView(store, callbacks);
+  initTeamView(store, callbacks);
 
   connectEventStream();
 
-  // Fetch initial metadata, sessions, pipelines, and pipeline runs in parallel
-  const [metaRes, sessionsRes, pipelinesRes, runsRes] = await Promise.allSettled([
+  // Fetch initial metadata, sessions, pipelines, pipeline runs, teams, and team runs in parallel
+  const [metaRes, sessionsRes, pipelinesRes, runsRes, teamsRes, teamRunsRes] = await Promise.allSettled([
     api.getMeta(),
     api.listSessions(),
     api.listPipelines(),
     api.listPipelineRuns(),
+    api.listTeams(),
+    api.listTeamRuns(),
   ]);
 
   if (metaRes.status === 'fulfilled' && metaRes.value) {
@@ -494,12 +576,27 @@ async function bootstrapApp() {
     }
   }
 
+  if (teamsRes.status === 'fulfilled' && teamsRes.value && Array.isArray(teamsRes.value.teams)) {
+    store.teams = teamsRes.value.teams;
+    if (store.teams.length > 0 && !store.activeTeamId) {
+      const defTeam = store.teams.find((t) => t.is_default) || store.teams[0];
+      store.activeTeamId = defTeam.id;
+    }
+  }
+
+  if (teamRunsRes.status === 'fulfilled' && teamRunsRes.value && Array.isArray(teamRunsRes.value.runs)) {
+    store.teamRuns = teamRunsRes.value.runs;
+  }
+
+  updateTeamInboxBadge();
   renderSessionsSidebar();
   renderPipelineBuilder();
   renderActiveRunPanel();
 
   if (store.sessions.length > 0 && !store.activeSessionId) {
-    await loadAndSelectSession(store.sessions[0].id);
+    const standalone = store.sessions.find((s) => !s.team_run_id);
+    const firstSession = standalone || store.sessions[0];
+    await loadAndSelectSession(firstSession.id);
   } else {
     renderSessionChatView();
   }
@@ -517,4 +614,6 @@ export default {
   refreshSessions,
   refreshPipelines,
   refreshRuns,
+  refreshTeams,
+  refreshTeamRuns,
 };

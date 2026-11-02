@@ -141,11 +141,56 @@ async function selectSession(sessionId) {
 }
 
 /**
+ * Builds the HTML for a single session card in the sidebar.
+ * @param {object} session
+ * @returns {string}
+ */
+function buildSessionCardHtml(session) {
+  const isSelected = session.id === appStore.activeSessionId;
+  const isRunning = session.status === 'running';
+  const turnCount = Number(session.turn_count || 0);
+  const turnLabel = `${turnCount} ${turnCount === 1 ? 'turn' : 'turns'}`;
+  const cwdBase = getBasename(session.working_dir || '');
+
+  return `
+    <div
+      class="session-card${isSelected ? ' active selected' : ''}"
+      data-session-id="${escapeHtml(session.id)}"
+      role="listitem"
+    >
+      <div class="session-card-row1">
+        <div class="session-card-title-group">
+          ${renderStatusDot(session.status)}
+          <span class="session-card-name" title="${escapeHtml(session.name)}">${escapeHtml(session.name)}</span>
+        </div>
+        ${
+          isRunning
+            ? `<button type="button" class="btn-stop-inline" data-stop-session-id="${escapeHtml(session.id)}" title="Stop running turn">■</button>`
+            : ''
+        }
+      </div>
+      <div class="session-card-row2">
+        ${renderProviderBadge(session.provider)}
+        ${renderRoleBadge(session.role)}
+        <span class="badge-mono" title="${escapeHtml(session.model)}">${escapeHtml(session.model)}</span>
+      </div>
+      <div class="session-card-row3">
+        <span>${escapeHtml(turnLabel)}</span>
+        <span class="session-card-cwd" title="${escapeHtml(session.working_dir || '')}">${escapeHtml(cwdBase)}</span>
+      </div>
+    </div>
+  `;
+}
+
+/**
  * Renders the persistent left sidebar sessions list (#sessions-list).
  */
 export function renderSessionsSidebar() {
   const listEl = document.getElementById('sessions-list');
   if (!listEl || !appStore) return;
+
+  const prevDetails = document.getElementById('sidebar-team-sessions-group');
+  const wasGroupOpen = prevDetails ? prevDetails.open : false;
 
   const sessions = appStore.sessions || [];
   if (sessions.length === 0) {
@@ -162,46 +207,34 @@ export function renderSessionsSidebar() {
     return;
   }
 
-  const cardsHtml = sessions
-    .map((session) => {
-      const isSelected = session.id === appStore.activeSessionId;
-      const isRunning = session.status === 'running';
-      const turnCount = Number(session.turn_count || 0);
-      const turnLabel = `${turnCount} ${turnCount === 1 ? 'turn' : 'turns'}`;
-      const cwdBase = getBasename(session.working_dir || '');
+  const standaloneSessions = sessions.filter((s) => !s.team_run_id);
+  const teamSessions = sessions.filter((s) => Boolean(s.team_run_id));
 
-      return `
-        <div
-          class="session-card${isSelected ? ' active selected' : ''}"
-          data-session-id="${escapeHtml(session.id)}"
-          role="listitem"
-        >
-          <div class="session-card-row1">
-            <div class="session-card-title-group">
-              ${renderStatusDot(session.status)}
-              <span class="session-card-name" title="${escapeHtml(session.name)}">${escapeHtml(session.name)}</span>
-            </div>
-            ${
-              isRunning
-                ? `<button type="button" class="btn-stop-inline" data-stop-session-id="${escapeHtml(session.id)}" title="Stop running turn">■</button>`
-                : ''
-            }
-          </div>
-          <div class="session-card-row2">
-            ${renderProviderBadge(session.provider)}
-            ${renderRoleBadge(session.role)}
-            <span class="badge-mono" title="${escapeHtml(session.model)}">${escapeHtml(session.model)}</span>
-          </div>
-          <div class="session-card-row3">
-            <span>${escapeHtml(turnLabel)}</span>
-            <span class="session-card-cwd" title="${escapeHtml(session.working_dir || '')}">${escapeHtml(cwdBase)}</span>
-          </div>
+  let standaloneHtml = standaloneSessions.map(buildSessionCardHtml).join('');
+  if (!standaloneHtml && teamSessions.length > 0) {
+    standaloneHtml = `
+      <div class="sessions-empty-state" style="padding: 12px 8px;">
+        <p>No standalone sessions yet.</p>
+      </div>
+    `;
+  }
+
+  let teamGroupHtml = '';
+  if (teamSessions.length > 0) {
+    const hasSelectedTeamSession = teamSessions.some((s) => s.id === appStore.activeSessionId);
+    const openAttr = (wasGroupOpen || hasSelectedTeamSession) ? ' open' : '';
+    const teamCardsHtml = teamSessions.map(buildSessionCardHtml).join('');
+    teamGroupHtml = `
+      <details id="sidebar-team-sessions-group" class="sidebar-team-group"${openAttr}>
+        <summary class="sidebar-team-summary">👥 Team Run Sessions (${teamSessions.length})</summary>
+        <div class="sidebar-team-list">
+          ${teamCardsHtml}
         </div>
-      `;
-    })
-    .join('');
+      </details>
+    `;
+  }
 
-  listEl.innerHTML = cardsHtml;
+  listEl.innerHTML = `${standaloneHtml}${teamGroupHtml}`;
 
   // Bind click events on session cards and inline stop buttons
   const cardEls = listEl.querySelectorAll('.session-card');
@@ -951,6 +984,10 @@ function formatRoleName(roleId) {
     implementer: 'Implementer',
     reviewer: 'Code Reviewer',
     custom: 'Custom',
+    pm: 'PM',
+    ui_designer: 'UI Designer',
+    architect: 'Code Architect',
+    ui_checker: 'UI Checker',
   };
   return map[(roleId || '').toLowerCase()] || roleId || 'Role';
 }

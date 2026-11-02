@@ -26,6 +26,11 @@
           <span>🔗</span>
           <span>Pipelines</span>
         </button>
+        <button type="button" class="nav-tab-btn" id="nav-tab-team">
+          <span>👥</span>
+          <span>Team</span>
+          <span id="team-inbox-badge" class="inbox-count-pill hidden">0</span>
+        </button>
         <button type="button" class="nav-tab-btn" id="nav-tab-history">
           <span>🕓</span>
           <span>Run History</span>
@@ -255,6 +260,140 @@
           </div>
         </section>
 
+        <!-- View 2.5: Team Mode & Live Run Board -->
+        <section id="view-team" class="view-panel hidden" aria-label="Team Mode View">
+          <div class="pipe-subtab-bar" id="team-subtab-bar">
+            <button type="button" class="pipe-subtab-btn active" id="team-subtab-launch">Launch &amp; Runs</button>
+            <button type="button" class="pipe-subtab-btn" id="team-subtab-board">Run Board</button>
+          </div>
+
+          <div class="team-split-layout">
+            <!-- Left Column: Team Launch & Team Runs List -->
+            <div id="team-launch-panel">
+              <div class="panel-title">Team Launch</div>
+
+              <div class="form-group">
+                <label for="team-preset-select" class="form-label">Team Preset</label>
+                <div class="pipeline-select-row">
+                  <select id="team-preset-select" class="select-input" title="Select a saved team configuration">
+                    <option value="">Default Engineering Team</option>
+                  </select>
+                  <button type="button" class="btn-secondary" id="btn-configure-team" title="Configure Team Roles &amp; Limits">⚙ Configure Team</button>
+                </div>
+              </div>
+
+              <div class="form-group">
+                <label for="team-target-repo-input" class="form-label">Target Repo (Git repository)</label>
+                <input
+                  type="text"
+                  id="team-target-repo-input"
+                  class="input-text"
+                  placeholder="/path/to/git/repo"
+                  required
+                >
+                <span class="form-hint">Must be an initialized Git repository with at least one commit.</span>
+              </div>
+
+              <div class="form-group">
+                <label for="team-task-prompt-input" class="form-label">Task Prompt</label>
+                <textarea
+                  id="team-task-prompt-input"
+                  class="input-text"
+                  rows="4"
+                  placeholder="Describe the feature, bugfix, or refactoring task for the 7-agent team..."
+                  required
+                ></textarea>
+              </div>
+
+              <label class="stage-approval-toggle">
+                <input type="checkbox" id="team-auto-approve-mockup">
+                <span>Auto-approve UI mockup (skip mockup review pause)</span>
+              </label>
+
+              <button type="button" class="btn-primary" id="btn-start-team-run">▶ Start Team Run</button>
+
+              <div class="team-runs-divider"></div>
+
+              <div class="panel-title" style="display: flex; align-items: center; justify-content: space-between;">
+                <span>Team Runs</span>
+                <span id="team-runs-count-badge" class="badge-mono">0</span>
+              </div>
+
+              <div id="team-runs-list" role="list">
+                <div class="sessions-empty-state" style="padding: 16px;">
+                  <p>No team runs yet. Enter a task prompt above to launch your first 7-agent team run.</p>
+                </div>
+              </div>
+            </div>
+
+            <!-- Right Column: Active Team Run Board -->
+            <div id="team-board-panel">
+              <div id="team-empty-board" class="sessions-empty-state">
+                <div class="empty-icon">👥</div>
+                <h3>No Team Run Selected</h3>
+                <p>Launch a new 7-agent Team Run on the left or select an existing run to watch the live board, answer PM questions, preview UI mockups, and review final diffs.</p>
+              </div>
+
+              <div id="team-active-board" class="hidden">
+                <!-- Run Summary Header -->
+                <div class="run-summary-header" id="team-run-header">
+                  <div class="run-summary-top">
+                    <div class="team-run-title-wrap">
+                      <span class="run-pipeline-title" id="team-run-title">Team Run</span>
+                      <span id="team-run-status-badge"></span>
+                      <span id="team-run-stage-badge" class="badge-permission"></span>
+                    </div>
+                    <div class="run-badges-group">
+                      <span id="team-run-branch-badge" class="badge-mono" title="Isolated Git Worktree Branch"></span>
+                      <span id="team-run-port-badge" class="badge-mono" title="Allocated Safe App Port"></span>
+                      <span id="team-run-rework-badge" class="stage-iteration-pill">Rework: 0 / 3</span>
+                      <span id="team-run-turns-badge" class="badge-mono">0 / 30 turns</span>
+                      <span id="team-run-timer" class="turn-elapsed-timer">00:00</span>
+                      <button type="button" class="btn-stop-pipeline hidden" id="btn-stop-team-run">■ Stop Team</button>
+                    </div>
+                  </div>
+                  <div id="team-stage-stepper" class="team-stage-stepper"></div>
+                  <details class="thinking-block" id="team-task-prompt-details">
+                    <summary>Original Task Prompt &amp; Workspace Info</summary>
+                    <div class="thinking-body" id="team-task-prompt-body"></div>
+                  </details>
+                </div>
+
+                <!-- User Inbox Panel (Touchpoints 1, 2, 3 & Limit/Restart Recovery) -->
+                <div id="team-user-inbox" class="hidden"></div>
+
+                <!-- 7-Agent Team Roster Strip -->
+                <div class="team-section-card">
+                  <div class="team-section-header">
+                    <span class="team-section-title">TEAM ROSTER</span>
+                    <span class="form-hint">Click any agent or "Chat ↗" to open its full session transcript</span>
+                  </div>
+                  <div id="team-roster-strip" class="team-roster-strip"></div>
+                </div>
+
+                <!-- Bottom Split: Inter-Agent Message Log & Live Stream Inspector -->
+                <div class="team-bottom-grid">
+                  <div class="team-section-card team-column-card">
+                    <div class="team-section-header">
+                      <span class="team-section-title">INTER-AGENT MESSAGES</span>
+                      <span id="team-messages-count" class="badge-mono">0 messages</span>
+                    </div>
+                    <div id="team-messages-log" class="team-messages-log" role="log"></div>
+                  </div>
+
+                  <div class="team-section-card team-column-card">
+                    <div class="team-section-header">
+                      <span class="team-section-title">LIVE AGENT STREAM</span>
+                      <div id="team-stream-role-tabs" class="team-stream-role-tabs"></div>
+                    </div>
+                    <div id="team-live-stream" class="team-live-stream"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
         <!-- View 3: Run History Browser -->
         <section id="view-history" class="view-panel hidden" aria-label="Run History View">
           <div class="history-split-layout">
@@ -463,6 +602,88 @@
           <div class="modal-footer">
             <button type="button" class="btn-secondary" id="btn-cancel-pipeline-modal">Cancel</button>
             <button type="submit" class="btn-primary" id="btn-submit-pipeline-start">Start</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Modal: Team Setup (#team-setup-modal) -->
+    <div id="team-setup-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="modal-team-setup-title">
+      <div class="modal-dialog modal-dialog-wide">
+        <div class="modal-header">
+          <h2 id="modal-team-setup-title" class="modal-title">Configure 7-Agent Engineering Team</h2>
+          <button type="button" class="modal-close-btn" id="btn-close-team-modal" aria-label="Close modal">&times;</button>
+        </div>
+
+        <form id="team-setup-form">
+          <div class="modal-body">
+            <div id="team-setup-error" class="modal-error-box hidden"></div>
+
+            <div class="team-modal-top-grid">
+              <div class="form-group">
+                <label for="team-setup-select" class="form-label">Saved Team Preset</label>
+                <div class="pipeline-select-row">
+                  <select id="team-setup-select" class="select-input">
+                    <option value="">-- New Team Preset --</option>
+                  </select>
+                  <button type="button" class="btn-secondary" id="btn-new-team-preset">+ New</button>
+                  <button type="button" class="btn-icon-danger" id="btn-delete-team-preset" title="Delete team preset">🗑</button>
+                </div>
+              </div>
+
+              <div class="form-group">
+                <label for="team-setup-name" class="form-label">Team Name</label>
+                <input type="text" id="team-setup-name" class="input-text" placeholder="e.g., Default Engineering Team" required>
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label for="team-setup-description" class="form-label">Description (optional)</label>
+              <input type="text" id="team-setup-description" class="input-text" placeholder="Short description of this 7-agent team setup">
+            </div>
+
+            <div class="team-limits-grid">
+              <div class="form-group">
+                <label for="team-limit-rework" class="form-label">Max Rework Loops</label>
+                <input type="number" id="team-limit-rework" class="input-text" min="0" max="10" value="3">
+              </div>
+              <div class="form-group">
+                <label for="team-limit-questions" class="form-label">Max Question Rounds</label>
+                <input type="number" id="team-limit-questions" class="input-text" min="1" max="10" value="4">
+              </div>
+              <div class="form-group">
+                <label for="team-limit-turns" class="form-label">Max Total Turns</label>
+                <input type="number" id="team-limit-turns" class="input-text" min="5" max="100" value="30">
+              </div>
+              <div class="form-group">
+                <label for="team-limit-turn-timeout" class="form-label">Turn Timeout (sec)</label>
+                <input type="number" id="team-limit-turn-timeout" class="input-text" min="30" max="7200" value="600">
+              </div>
+              <div class="form-group">
+                <label for="team-limit-run-timeout" class="form-label">Run Timeout (sec)</label>
+                <input type="number" id="team-limit-run-timeout" class="input-text" min="60" max="28800" value="3600">
+              </div>
+            </div>
+
+            <label class="stage-approval-toggle">
+              <input type="checkbox" id="team-setup-auto-approve">
+              <span>Auto-approve UI mockup by default for this team</span>
+            </label>
+
+            <div class="form-group">
+              <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px;">
+                <label class="form-label">7-Role Agent Configuration</label>
+                <button type="button" class="btn-secondary" id="btn-reset-team-defaults" style="font-size: 11px; padding: 3px 8px;">↺ Reset to Recommended Defaults</button>
+              </div>
+              <div id="team-setup-members-list" class="team-members-table">
+                <!-- Populated dynamically by team.js -->
+              </div>
+            </div>
+          </div>
+
+          <div class="modal-footer">
+            <button type="button" class="btn-secondary" id="btn-cancel-team-modal">Cancel</button>
+            <button type="submit" class="btn-primary" id="btn-save-team-modal">Save Team</button>
           </div>
         </form>
       </div>
