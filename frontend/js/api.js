@@ -1,5 +1,5 @@
 /**
- * Agent Relay — Frontend API Client
+ * Baton — Frontend API Client
  * Typed fetch wrapper for all /api/* backend endpoints.
  */
 
@@ -99,6 +99,13 @@ export async function getTurn(turnId) {
   return request(`/api/turns/${encodeURIComponent(turnId)}`);
 }
 
+export async function forwardTurn(turnId, payload) {
+  return request(`/api/turns/${encodeURIComponent(turnId)}/forward`, {
+    method: 'POST',
+    body: payload,
+  });
+}
+
 // --- Pipelines ---
 export async function listPipelines() {
   return request('/api/pipelines');
@@ -125,9 +132,32 @@ export async function deletePipeline(pipelineId) {
 }
 
 export async function startPipelineRun(pipelineId, payload) {
+  let body = {};
+  if (typeof payload === 'string') {
+    body = { task_prompt: payload };
+  } else if (payload && typeof payload === 'object') {
+    body = {
+      task_prompt: payload.task_prompt != null ? payload.task_prompt : '',
+    };
+    if (payload.start_stage_index !== undefined && payload.start_stage_index !== null) {
+      body.start_stage_index = Number(payload.start_stage_index);
+    }
+    if (payload.initial_input !== undefined && payload.initial_input !== null) {
+      body.initial_input = payload.initial_input;
+    }
+    if (payload.initial_input_turn_id !== undefined && payload.initial_input_turn_id !== null) {
+      body.initial_input_turn_id = payload.initial_input_turn_id;
+    }
+    for (const [k, v] of Object.entries(payload)) {
+      if (!(k in body) && v !== undefined) {
+        body[k] = v;
+      }
+    }
+  }
+
   return request(`/api/pipelines/${encodeURIComponent(pipelineId)}/runs`, {
     method: 'POST',
-    body: payload,
+    body,
   });
 }
 
@@ -165,6 +195,7 @@ export const api = {
   stopSession,
   listTurns,
   getTurn,
+  forwardTurn,
   listPipelines,
   createPipeline,
   updatePipeline,

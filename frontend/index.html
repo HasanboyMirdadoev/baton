@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Agent Relay</title>
+  <title>Baton</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
@@ -13,7 +13,7 @@
       <div class="brand-wrapper">
         <div class="brand-title">
           <span class="brand-icon">⚡</span>
-          <span>Agent Relay</span>
+          <span>Baton</span>
         </div>
       </div>
 
@@ -177,8 +177,29 @@
 
               <!-- Task Launch Card at Bottom -->
               <div class="task-launch-card">
-                <label for="pipeline-task-input" class="form-label">Launch Task</label>
-                <textarea id="pipeline-task-input" placeholder="Enter the task prompt for Stage 1..." rows="3"></textarea>
+                <div class="form-group">
+                  <label for="pipeline-start-stage-select" class="form-label">Start From Stage</label>
+                  <select id="pipeline-start-stage-select" class="select-input" title="Choose stage to start pipeline from">
+                    <option value="0">Stage 1</option>
+                  </select>
+                </div>
+
+                <div id="pipeline-stage-input-group" class="form-group hidden">
+                  <label for="pipeline-stage-input" class="form-label">Input For This Stage (required)</label>
+                  <textarea
+                    id="pipeline-stage-input"
+                    class="input-text"
+                    rows="3"
+                    placeholder="Paste design, plan, or specification for this stage..."
+                  ></textarea>
+                  <span class="form-hint">Passed as the handoff input from previous stage.</span>
+                </div>
+
+                <div class="form-group">
+                  <label for="pipeline-task-input" class="form-label" id="pipeline-task-label">Launch Task</label>
+                  <textarea id="pipeline-task-input" placeholder="Enter the task prompt for Stage 1..." rows="3"></textarea>
+                </div>
+
                 <button type="button" id="btn-run-pipeline">▶ Run Pipeline</button>
               </div>
             </div>
@@ -197,6 +218,7 @@
                     <div class="run-badges-group">
                       <span id="run-header-status"></span>
                       <span id="run-header-loop" class="stage-iteration-pill hidden">Review Loop: 0 / 2</span>
+                      <span id="run-header-skipped" class="stage-skipped-note hidden"></span>
                       <span id="run-header-timer" class="turn-elapsed-timer">00:00</span>
                       <button type="button" class="btn-stop-pipeline hidden" id="btn-stop-pipeline">■ Stop Pipeline</button>
                     </div>
@@ -350,6 +372,97 @@
           <div class="modal-footer">
             <button type="button" class="btn-secondary" id="btn-cancel-new-session">Cancel</button>
             <button type="submit" class="btn-primary" id="btn-submit-new-session">Create Session</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Modal: Forward Turn ("Send to...") -->
+    <div id="forward-turn-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="modal-forward-turn-title">
+      <div class="modal-dialog">
+        <div class="modal-header">
+          <h2 id="modal-forward-turn-title" class="modal-title">Send to Another Session</h2>
+          <button type="button" class="modal-close-btn" id="btn-close-forward-modal" aria-label="Close modal">&times;</button>
+        </div>
+
+        <form id="forward-turn-form">
+          <input type="hidden" id="forward-source-turn-id" value="">
+          <div class="modal-body">
+            <!-- Inline Error Box -->
+            <div id="forward-turn-error" class="modal-error-box hidden"></div>
+
+            <div class="form-group">
+              <label for="forward-target-session" class="form-label">Target Session</label>
+              <select id="forward-target-session" class="select-input" required>
+                <!-- Populated dynamically with all other sessions -->
+              </select>
+              <div id="forward-target-badges" class="stage-session-badges" style="display: flex; align-items: center; gap: 6px; margin-top: 4px; flex-wrap: wrap;"></div>
+            </div>
+
+            <div class="form-group">
+              <label for="forward-instructions" class="form-label">Instructions (optional)</label>
+              <textarea
+                id="forward-instructions"
+                class="input-text"
+                rows="3"
+                placeholder="Optional instructions for target session (e.g., 'Review these architectural choices for performance bottlenecks')"
+              ></textarea>
+              <span class="form-hint">Defaults to: "Proceed with your role using the output below."</span>
+            </div>
+          </div>
+
+          <div class="modal-footer">
+            <button type="button" class="btn-secondary" id="btn-cancel-forward-modal">Cancel</button>
+            <button type="submit" class="btn-primary" id="btn-submit-forward">Send</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Modal: Continue in Pipeline -->
+    <div id="continue-pipeline-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="modal-continue-pipeline-title">
+      <div class="modal-dialog">
+        <div class="modal-header">
+          <h2 id="modal-continue-pipeline-title" class="modal-title">Continue in Pipeline</h2>
+          <button type="button" class="modal-close-btn" id="btn-close-pipeline-modal" aria-label="Close modal">&times;</button>
+        </div>
+
+        <form id="continue-pipeline-form">
+          <input type="hidden" id="pipeline-source-turn-id" value="">
+          <div class="modal-body">
+            <!-- Inline Error Box -->
+            <div id="continue-pipeline-error" class="modal-error-box hidden"></div>
+
+            <div class="form-group">
+              <label for="continue-pipeline-select" class="form-label">Choose Pipeline</label>
+              <select id="continue-pipeline-select" class="select-input" required>
+                <!-- Populated dynamically from appStore.pipelines -->
+              </select>
+            </div>
+
+            <div class="form-group">
+              <label for="continue-pipeline-stage-select" class="form-label">Start Stage</label>
+              <select id="continue-pipeline-stage-select" class="select-input" required>
+                <!-- Populated dynamically as: "Stage N: name — session (role)" -->
+              </select>
+              <span id="continue-pipeline-stage-hint" class="form-hint">Earlier stages will be skipped; this turn’s response will be fed as initial input.</span>
+            </div>
+
+            <div class="form-group">
+              <label for="continue-pipeline-task-prompt" class="form-label">Original Task (optional)</label>
+              <textarea
+                id="continue-pipeline-task-prompt"
+                class="input-text"
+                rows="3"
+                placeholder="Prefilled with this turn's user prompt..."
+              ></textarea>
+              <span class="form-hint">Context provided to subsequent stages alongside the input.</span>
+            </div>
+          </div>
+
+          <div class="modal-footer">
+            <button type="button" class="btn-secondary" id="btn-cancel-pipeline-modal">Cancel</button>
+            <button type="submit" class="btn-primary" id="btn-submit-pipeline-start">Start</button>
           </div>
         </form>
       </div>

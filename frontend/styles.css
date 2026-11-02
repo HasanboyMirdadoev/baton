@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Agent Relay — CSS Design System & Layout
+   Baton — CSS Design System & Layout
    Zero-build native CSS with prefers-color-scheme light/dark theming
    ========================================================================== */
 
@@ -376,6 +376,19 @@ a:hover {
   color: var(--text-muted);
 }
 
+/* Stage skipped note badge */
+.stage-skipped-note {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 7px;
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-elevated);
+  color: var(--text-muted);
+  border: 1px solid var(--border-subtle);
+  display: inline-flex;
+  align-items: center;
+}
+
 /* ==========================================================================
    App Shell Grid Layout
    ========================================================================== */
@@ -680,6 +693,25 @@ a:hover {
 }
 .btn-secondary:hover {
   background-color: var(--bg-hover);
+}
+
+.btn-primary {
+  background-color: var(--accent-primary);
+  color: var(--accent-primary-fg);
+  border: 1px solid transparent;
+  padding: 5px 12px;
+  border-radius: var(--radius-sm);
+  font-weight: 600;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.btn-primary:hover {
+  background-color: var(--accent-primary-hover);
+}
+.btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* ==========================================================================
@@ -1080,6 +1112,42 @@ details.tool-card summary.tool-summary::-webkit-details-marker {
   margin-top: var(--space-2);
   color: var(--status-rework-fg);
   font-weight: 700;
+}
+
+/* Turn Handoff Actions */
+.turn-handoff-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  margin-bottom: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: 1px dashed var(--border-subtle);
+}
+
+.btn-handoff {
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-strong);
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  font-weight: 500;
+  padding: 3px 9px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  transition: all 0.15s ease;
+}
+
+.btn-handoff:hover {
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
+  border-color: var(--accent-primary);
+}
+
+.btn-handoff span {
+  font-size: 11px;
 }
 
 /* Turn Footer */

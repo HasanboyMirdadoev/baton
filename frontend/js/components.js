@@ -1,5 +1,5 @@
 /**
- * Agent Relay — Reusable UI Components & DOM Helpers
+ * Baton — Reusable UI Components & DOM Helpers
  */
 
 /**

@@ -1,5 +1,5 @@
 /**
- * Agent Relay — Main Application Entry, View Router, Shared Store & SSE Manager
+ * Baton — Main Application Entry, View Router, Shared Store & SSE Manager
  */
 
 import { api } from './api.js';

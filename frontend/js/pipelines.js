@@ -1,5 +1,5 @@
 /**
- * Agent Relay — Pipeline Builder, Stage Editor & Pipeline Launcher
+ * Baton — Pipeline Builder, Stage Editor & Pipeline Launcher
  */
 
 import { api } from './api.js';
@@ -180,6 +180,60 @@ function renderStagesList() {
     .join('');
 
   container.innerHTML = stagesHtml;
+  updateStartStageDropdown();
+}
+
+/**
+ * Toggles visibility of "Input for this stage" and updates task prompt label/placeholder.
+ */
+function syncStageInputGroup() {
+  const startSelect = document.getElementById('pipeline-start-stage-select');
+  const group = document.getElementById('pipeline-stage-input-group');
+  const taskLabel = document.getElementById('pipeline-task-label');
+  const taskInput = document.getElementById('pipeline-task-input');
+
+  const startIndex = startSelect ? (parseInt(startSelect.value, 10) || 0) : 0;
+
+  if (startIndex > 0) {
+    if (group) group.classList.remove('hidden');
+    if (taskLabel) taskLabel.textContent = 'Original Task (optional)';
+    if (taskInput) taskInput.placeholder = 'Optional original task prompt (defaults to: Continue from the input below)...';
+  } else {
+    if (group) group.classList.add('hidden');
+    if (taskLabel) taskLabel.textContent = 'Launch Task';
+    if (taskInput) taskInput.placeholder = 'Enter the task prompt for Stage 1...';
+  }
+}
+
+/**
+ * Populates the "Start from stage" dropdown in the launcher card with current stages.
+ */
+function updateStartStageDropdown() {
+  const startSelect = document.getElementById('pipeline-start-stage-select');
+  if (!startSelect) return;
+
+  const curVal = parseInt(startSelect.value, 10) || 0;
+  const stages = editingStages || [];
+
+  if (stages.length === 0) {
+    startSelect.innerHTML = '<option value="0">Stage 1</option>';
+    startSelect.value = '0';
+    syncStageInputGroup();
+    return;
+  }
+
+  const optionsHtml = stages.map((s, idx) => {
+    const name = s.name ? s.name.trim() : `Stage ${idx + 1}`;
+    return `<option value="${idx}">Stage ${idx + 1}: ${escapeHtml(name)}</option>`;
+  }).join('');
+
+  startSelect.innerHTML = optionsHtml;
+  if (curVal < stages.length) {
+    startSelect.value = String(curVal);
+  } else {
+    startSelect.value = '0';
+  }
+  syncStageInputGroup();
 }
 
 /**
@@ -390,18 +444,32 @@ async function handleSavePipeline() {
 }
 
 /**
- * Launches a new pipeline run with the user's task prompt.
+ * Launches a new pipeline run with the user's task prompt and optional stage selection.
  */
 async function handleRunPipeline() {
   if (!appStore) return;
 
+  const startStageSelect = document.getElementById('pipeline-start-stage-select');
+  const startStageIndex = startStageSelect ? (parseInt(startStageSelect.value, 10) || 0) : 0;
+
   const taskInput = document.getElementById('pipeline-task-input');
   const taskPrompt = taskInput ? taskInput.value.trim() : '';
 
-  if (!taskPrompt) {
-    showToast('Please enter a task prompt for Stage 1', 'warning');
-    if (taskInput) taskInput.focus();
-    return;
+  const stageInput = document.getElementById('pipeline-stage-input');
+  const initialInput = stageInput ? stageInput.value.trim() : '';
+
+  if (startStageIndex === 0) {
+    if (!taskPrompt) {
+      showToast('Please enter a task prompt for Stage 1', 'warning');
+      if (taskInput) taskInput.focus();
+      return;
+    }
+  } else {
+    if (!initialInput) {
+      showToast('Please enter input for this stage', 'warning');
+      if (stageInput) stageInput.focus();
+      return;
+    }
   }
 
   // If no pipeline is selected yet or unsaved edits exist, save definition first
@@ -419,8 +487,17 @@ async function handleRunPipeline() {
   }
 
   try {
-    const res = await api.startPipelineRun(pipelineId, { task_prompt: taskPrompt });
+    const payload = {
+      task_prompt: taskPrompt,
+      start_stage_index: startStageIndex,
+    };
+    if (startStageIndex > 0) {
+      payload.initial_input = initialInput;
+    }
+
+    const res = await api.startPipelineRun(pipelineId, payload);
     if (taskInput) taskInput.value = '';
+    if (stageInput) stageInput.value = '';
 
     if (res && res.run) {
       appStore.activeRunId = res.run.id;
@@ -656,6 +733,14 @@ export function initPipelinesView(store, callbacks) {
   const btnRun = document.getElementById('btn-run-pipeline');
   if (btnRun) {
     btnRun.addEventListener('click', handleRunPipeline);
+  }
+
+  // Start from stage select change listener
+  const startSelect = document.getElementById('pipeline-start-stage-select');
+  if (startSelect) {
+    startSelect.addEventListener('change', () => {
+      syncStageInputGroup();
+    });
   }
 
   // Compact layout sub-tab buttons

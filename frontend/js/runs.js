@@ -1,5 +1,5 @@
 /**
- * Agent Relay — Active Pipeline Run Timeline & Run History Views
+ * Baton — Active Pipeline Run Timeline & Run History Views
  */
 
 import { api } from './api.js';
@@ -109,10 +109,22 @@ function buildToolCardsFromEvents(events) {
 /**
  * Generates HTML for the ordered stage run cards.
  * @param {Array} stageRuns
+ * @param {object|null} run
  * @returns {string}
  */
-function renderTimelineStages(stageRuns) {
-  if (!stageRuns || stageRuns.length === 0) {
+function renderTimelineStages(stageRuns, run = null) {
+  const startIndex = (run && run.start_stage_index != null) ? Number(run.start_stage_index) : 0;
+  const visibleStages = (stageRuns || []).filter((s) => {
+    if (startIndex > 0 && s.stage_order < startIndex) {
+      return false;
+    }
+    if (s.status === 'skipped') {
+      return false;
+    }
+    return true;
+  });
+
+  if (!visibleStages || visibleStages.length === 0) {
     return `
       <div class="sessions-empty-state" style="padding: 24px;">
         <p>No stage executions recorded yet.</p>
@@ -120,7 +132,7 @@ function renderTimelineStages(stageRuns) {
     `;
   }
 
-  return stageRuns
+  return visibleStages
     .map((stageRun) => {
       const isRunning = stageRun.status === 'running';
 
@@ -316,6 +328,17 @@ export function renderActiveRunPanel() {
     }
   }
 
+  const skippedEl = document.getElementById('run-header-skipped');
+  if (skippedEl) {
+    const startIndex = Number(run.start_stage_index || 0);
+    if (startIndex > 0) {
+      skippedEl.textContent = `Started at Stage ${startIndex + 1} — earlier stages skipped`;
+      skippedEl.classList.remove('hidden');
+    } else {
+      skippedEl.classList.add('hidden');
+    }
+  }
+
   const timerEl = document.getElementById('run-header-timer');
   const stopBtn = document.getElementById('btn-stop-pipeline');
 
@@ -360,7 +383,7 @@ export function renderActiveRunPanel() {
   // 3. Live Per-Stage Timeline
   const timelineEl = document.getElementById('stage-runs-timeline');
   if (timelineEl) {
-    timelineEl.innerHTML = renderTimelineStages(stageRuns);
+    timelineEl.innerHTML = renderTimelineStages(stageRuns, run);
   }
 }
 
@@ -600,12 +623,18 @@ async function renderHistoryDetail() {
         errorAlert = `<div class="turn-error-box" style="margin-top: 8px;">${escapeHtml(run.error_message)}</div>`;
       }
 
+      const startIndex = Number(run.start_stage_index || 0);
+      const skippedBadge = startIndex > 0
+        ? `<span class="stage-skipped-note">Started at Stage ${startIndex + 1} — earlier stages skipped</span>`
+        : '';
+
       contentEl.innerHTML = `
         <div class="run-summary-header" style="margin-bottom: 16px;">
           <div class="run-summary-top">
             <div class="run-pipeline-title">${escapeHtml(run.pipeline_name || 'Pipeline Run')}</div>
             <div class="run-badges-group">
               ${renderStatusBadge(run.status)}
+              ${skippedBadge}
               ${
                 run.max_review_loops > 0
                   ? `<span class="stage-iteration-pill">Review Loop: ${run.review_loop_count || 0} / ${run.max_review_loops}</span>`
@@ -630,7 +659,7 @@ async function renderHistoryDetail() {
         </div>
 
         <div id="history-stage-timeline">
-          ${renderTimelineStages(stageRuns)}
+          ${renderTimelineStages(stageRuns, run)}
         </div>
       `;
     } catch (err) {

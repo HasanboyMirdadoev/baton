@@ -1,5 +1,5 @@
 /**
- * Agent Relay — Sessions Sidebar, New Session Modal & Live Session Chat View
+ * Baton — Sessions Sidebar, New Session Modal & Live Session Chat View
  */
 
 import { api } from './api.js';
@@ -107,12 +107,16 @@ async function selectSession(sessionId) {
   }
 
   renderSessionsSidebar();
-  renderSessionChatView();
 
   if (!sessionId) {
     appStore.activeSessionTurns = [];
     renderSessionChatView();
     return;
+  }
+
+  const session = getActiveSession();
+  if (session) {
+    renderSessionHeaderAndComposer(session);
   }
 
   try {
@@ -423,12 +427,28 @@ function buildTurnAgentCardInnerHtml(turn) {
     </div>
   `;
 
+  // Handoff Actions ("Send to..." and "Continue in pipeline...")
+  let actionsHtml = '';
+  if (turn.status === 'completed' && Boolean((responseText || '').trim())) {
+    actionsHtml = `
+      <div class="turn-handoff-actions">
+        <button type="button" class="btn-handoff btn-forward-turn" data-forward-turn-id="${escapeHtml(turn.id)}" title="Send this response to another session">
+          <span>↗</span> Send to…
+        </button>
+        <button type="button" class="btn-handoff btn-pipeline-turn" data-pipeline-turn-id="${escapeHtml(turn.id)}" title="Continue this response in a pipeline">
+          <span>▶</span> Continue in pipeline…
+        </button>
+      </div>
+    `;
+  }
+
   return `
     ${thinkingHtml}
     ${toolsContainerHtml}
     ${markdownHtml}
     ${deniedHtml}
     ${statusAlertHtml}
+    ${actionsHtml}
     ${footerHtml}
   `;
 }
@@ -514,6 +534,12 @@ function updateLiveTurnCardDom(turnId) {
 
   const shouldScroll = isNearBottom(transcript);
   let turn = (appStore.activeSessionTurns || []).find((t) => t.id === turnId);
+  if (!turn && appStore.allTurns) {
+    turn = appStore.allTurns.find((t) => t.id === turnId);
+    if (turn && turn.session_id === appStore.activeSessionId) {
+      appStore.activeSessionTurns.push(turn);
+    }
+  }
   if (!turn) return;
 
   let agentCard = document.getElementById(`turn-agent-${turnId}`);
@@ -914,6 +940,236 @@ function closeNewSessionModal() {
 }
 
 /**
+ * Formats a role ID into a display label.
+ * @param {string} roleId
+ * @returns {string}
+ */
+function formatRoleName(roleId) {
+  const map = {
+    designer: 'Designer',
+    planner: 'Planner',
+    implementer: 'Implementer',
+    reviewer: 'Code Reviewer',
+    custom: 'Custom',
+  };
+  return map[(roleId || '').toLowerCase()] || roleId || 'Role';
+}
+
+/**
+ * Updates provider and role badges below target session select in Forward modal.
+ */
+function updateForwardTargetBadges() {
+  const targetSelect = document.getElementById('forward-target-session');
+  const targetBadges = document.getElementById('forward-target-badges');
+  const submitBtn = document.getElementById('btn-submit-forward');
+  if (!targetSelect || !targetBadges) return;
+
+  const sid = targetSelect.value;
+  const sess = (appStore.sessions || []).find((s) => s.id === sid);
+  if (!sess) {
+    targetBadges.innerHTML = '';
+    if (submitBtn) submitBtn.disabled = true;
+    return;
+  }
+
+  const isBusy = sess.status === 'running';
+  targetBadges.innerHTML = `
+    ${renderProviderBadge(sess.provider)}
+    ${renderRoleBadge(sess.role)}
+    <span class="badge-mono">${escapeHtml(sess.model || '')}</span>
+    ${isBusy ? '<span class="status-badge status-running"><span class="status-dot running"></span> Busy</span>' : ''}
+  `;
+
+  if (submitBtn) {
+    submitBtn.disabled = isBusy;
+  }
+}
+
+/**
+ * Opens and initializes the Forward Turn ("Send to...") Modal.
+ * @param {string} turnId
+ */
+export function openForwardTurnModal(turnId) {
+  const modal = document.getElementById('forward-turn-modal');
+  if (!modal || !appStore) return;
+
+  const turn = (appStore.activeSessionTurns || []).find((t) => t.id === turnId) ||
+    (appStore.allTurns || []).find((t) => t.id === turnId);
+  if (!turn) return;
+
+  const sourceSessionId = turn.session_id || appStore.activeSessionId;
+
+  const turnIdInput = document.getElementById('forward-source-turn-id');
+  const errorBox = document.getElementById('forward-turn-error');
+  const targetSelect = document.getElementById('forward-target-session');
+  const instructionsInput = document.getElementById('forward-instructions');
+  const submitBtn = document.getElementById('btn-submit-forward');
+
+  if (turnIdInput) turnIdInput.value = turn.id;
+  if (errorBox) {
+    errorBox.textContent = '';
+    errorBox.classList.add('hidden');
+  }
+  if (instructionsInput) instructionsInput.value = '';
+
+  const sessions = (appStore.sessions || []).filter((s) => s.id !== sourceSessionId);
+
+  if (targetSelect) {
+    if (sessions.length === 0) {
+      targetSelect.innerHTML = '<option value="" disabled selected>No other sessions available</option>';
+      if (submitBtn) submitBtn.disabled = true;
+    } else {
+      targetSelect.innerHTML = sessions.map((s) => {
+        const isBusy = s.status === 'running';
+        const provUpper = (s.provider || '').toUpperCase();
+        const roleLabel = formatRoleName(s.role);
+        const busyLabel = isBusy ? ' — (Busy: running turn)' : '';
+        return `<option value="${escapeHtml(s.id)}"${isBusy ? ' disabled' : ''}>${escapeHtml(s.name)} [${escapeHtml(provUpper)} · ${escapeHtml(roleLabel)}]${busyLabel}</option>`;
+      }).join('');
+
+      // Select first non-running session if available
+      const firstAvailable = sessions.find((s) => s.status !== 'running') || sessions[0];
+      targetSelect.value = firstAvailable.id;
+      if (submitBtn) submitBtn.disabled = firstAvailable.status === 'running';
+    }
+  }
+
+  updateForwardTargetBadges();
+  modal.classList.remove('hidden');
+  if (instructionsInput) {
+    setTimeout(() => instructionsInput.focus(), 20);
+  }
+}
+
+/**
+ * Closes the Forward Turn Modal.
+ */
+function closeForwardTurnModal() {
+  const modal = document.getElementById('forward-turn-modal');
+  if (modal) {
+    modal.classList.add('hidden');
+  }
+}
+
+/**
+ * Populates start stages dropdown in Continue Pipeline Modal.
+ * @param {string} pipelineId
+ */
+function populatePipelineStagesForModal(pipelineId) {
+  const stageSelect = document.getElementById('continue-pipeline-stage-select');
+  const stageHint = document.getElementById('continue-pipeline-stage-hint');
+  const submitBtn = document.getElementById('btn-submit-pipeline-start');
+  if (!stageSelect) return;
+
+  const pipe = (appStore.pipelines || []).find((p) => p.id === pipelineId);
+  const stages = (pipe && Array.isArray(pipe.stages)) ? pipe.stages : [];
+
+  if (stages.length === 0) {
+    stageSelect.innerHTML = '<option value="" disabled selected>Pipeline has no stages</option>';
+    if (stageHint) stageHint.textContent = 'This pipeline has no stages configured.';
+    if (submitBtn) submitBtn.disabled = true;
+    return;
+  }
+
+  // Contract B: start_stage_index must be > 0 when initial_input_turn_id is provided.
+  // Stage 1 (index 0) cannot receive handoff input and is disabled.
+  const optionsHtml = stages.map((st, idx) => {
+    const sess = (appStore.sessions || []).find((s) => s.id === st.session_id);
+    const sessName = sess ? sess.name : 'Unassigned';
+    const roleLabel = sess ? formatRoleName(sess.role) : 'Role';
+    const label = `Stage ${idx + 1}: ${st.name} — ${sessName} (${roleLabel})`;
+    const isDisabled = idx === 0;
+    const note = isDisabled ? ' [Stage 1 cannot receive handoff input]' : '';
+    return `<option value="${idx}"${isDisabled ? ' disabled' : ''}>${escapeHtml(label)}${note}</option>`;
+  }).join('');
+
+  stageSelect.innerHTML = optionsHtml;
+
+  if (stages.length > 1) {
+    stageSelect.value = '1';
+    if (stageHint) {
+      stageHint.textContent = 'Earlier stages will be skipped; this turn’s response will be fed as initial input to the selected stage.';
+    }
+    if (submitBtn) submitBtn.disabled = false;
+  } else {
+    stageSelect.value = '0';
+    if (stageHint) {
+      stageHint.textContent = 'This pipeline only has 1 stage. Pipelines must have at least 2 stages to continue from a later stage.';
+    }
+    if (submitBtn) submitBtn.disabled = true;
+  }
+}
+
+/**
+ * Opens and initializes the Continue in Pipeline Modal.
+ * @param {string} turnId
+ */
+export async function openContinuePipelineModal(turnId) {
+  const modal = document.getElementById('continue-pipeline-modal');
+  if (!modal || !appStore) return;
+
+  const turn = (appStore.activeSessionTurns || []).find((t) => t.id === turnId) ||
+    (appStore.allTurns || []).find((t) => t.id === turnId);
+  if (!turn) return;
+
+  if (!appStore.pipelines || appStore.pipelines.length === 0) {
+    try {
+      const res = await api.listPipelines();
+      if (res && Array.isArray(res.pipelines)) {
+        appStore.pipelines = res.pipelines;
+      }
+    } catch (_) {}
+  }
+
+  const turnIdInput = document.getElementById('pipeline-source-turn-id');
+  const errorBox = document.getElementById('continue-pipeline-error');
+  const pipelineSelect = document.getElementById('continue-pipeline-select');
+  const taskPromptInput = document.getElementById('continue-pipeline-task-prompt');
+  const submitBtn = document.getElementById('btn-submit-pipeline-start');
+
+  if (turnIdInput) turnIdInput.value = turn.id;
+  if (errorBox) {
+    errorBox.textContent = '';
+    errorBox.classList.add('hidden');
+  }
+  if (taskPromptInput) {
+    taskPromptInput.value = turn.prompt || '';
+  }
+
+  const pipelines = appStore.pipelines || [];
+  if (pipelineSelect) {
+    if (pipelines.length === 0) {
+      pipelineSelect.innerHTML = '<option value="" disabled selected>No saved pipelines available</option>';
+      const stageSelect = document.getElementById('continue-pipeline-stage-select');
+      if (stageSelect) stageSelect.innerHTML = '<option value="" disabled selected>No stages</option>';
+      if (submitBtn) submitBtn.disabled = true;
+    } else {
+      pipelineSelect.innerHTML = pipelines.map((p) => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)}</option>`).join('');
+
+      if (appStore.activePipelineId && pipelines.some((p) => p.id === appStore.activePipelineId)) {
+        pipelineSelect.value = appStore.activePipelineId;
+      } else {
+        pipelineSelect.value = pipelines[0].id;
+      }
+
+      populatePipelineStagesForModal(pipelineSelect.value);
+    }
+  }
+
+  modal.classList.remove('hidden');
+}
+
+/**
+ * Closes the Continue in Pipeline Modal.
+ */
+function closeContinuePipelineModal() {
+  const modal = document.getElementById('continue-pipeline-modal');
+  if (modal) {
+    modal.classList.add('hidden');
+  }
+}
+
+/**
  * Handles live SSE events relevant to sessions and turns.
  * @param {string} eventName
  * @param {object} data
@@ -1064,8 +1320,18 @@ export function initSessionsView(store, callbacks = {}) {
   }
 
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && modal && !modal.classList.contains('hidden')) {
-      closeNewSessionModal();
+    if (e.key === 'Escape') {
+      if (modal && !modal.classList.contains('hidden')) {
+        closeNewSessionModal();
+      }
+      const fwdModal = document.getElementById('forward-turn-modal');
+      if (fwdModal && !fwdModal.classList.contains('hidden')) {
+        closeForwardTurnModal();
+      }
+      const pipeModal = document.getElementById('continue-pipeline-modal');
+      if (pipeModal && !pipeModal.classList.contains('hidden')) {
+        closeContinuePipelineModal();
+      }
     }
   });
 
@@ -1289,6 +1555,226 @@ export function initSessionsView(store, callbacks = {}) {
       }
     });
   }
+
+  // Delegated click handler on transcript for "Send to..." and "Continue in pipeline..."
+  const transcript = document.getElementById('chat-transcript');
+  if (transcript) {
+    transcript.addEventListener('click', (e) => {
+      const fwdBtn = e.target.closest('[data-forward-turn-id]');
+      if (fwdBtn) {
+        const turnId = fwdBtn.getAttribute('data-forward-turn-id');
+        if (turnId) openForwardTurnModal(turnId);
+        return;
+      }
+
+      const pipeBtn = e.target.closest('[data-pipeline-turn-id]');
+      if (pipeBtn) {
+        const turnId = pipeBtn.getAttribute('data-pipeline-turn-id');
+        if (turnId) openContinuePipelineModal(turnId);
+        return;
+      }
+    });
+  }
+
+  // Forward Turn Modal event handlers
+  const fwdModal = document.getElementById('forward-turn-modal');
+  const btnCloseFwd = document.getElementById('btn-close-forward-modal');
+  const btnCancelFwd = document.getElementById('btn-cancel-forward-modal');
+  const fwdTargetSelect = document.getElementById('forward-target-session');
+  const fwdForm = document.getElementById('forward-turn-form');
+
+  if (btnCloseFwd) {
+    btnCloseFwd.addEventListener('click', closeForwardTurnModal);
+  }
+  if (btnCancelFwd) {
+    btnCancelFwd.addEventListener('click', closeForwardTurnModal);
+  }
+  if (fwdModal) {
+    fwdModal.addEventListener('click', (e) => {
+      if (e.target === fwdModal) {
+        closeForwardTurnModal();
+      }
+    });
+  }
+  if (fwdTargetSelect) {
+    fwdTargetSelect.addEventListener('change', updateForwardTargetBadges);
+  }
+
+  if (fwdForm) {
+    fwdForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const turnId = document.getElementById('forward-source-turn-id')?.value;
+      const targetSessionId = document.getElementById('forward-target-session')?.value;
+      const instructions = (document.getElementById('forward-instructions')?.value || '').trim();
+      const errorBox = document.getElementById('forward-turn-error');
+      const submitBtn = document.getElementById('btn-submit-forward');
+
+      if (!turnId || !targetSessionId) return;
+
+      if (errorBox) {
+        errorBox.textContent = '';
+        errorBox.classList.add('hidden');
+      }
+
+      if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Sending...';
+      }
+
+      try {
+        const payload = { target_session_id: targetSessionId };
+        if (instructions) {
+          payload.instructions = instructions;
+        }
+
+        // Switch to the target session and load its turns first so that:
+        // 1. Target session's history is fetched and rendered in the chat view.
+        // 2. targetSessionId is activeSessionId when the backend starts the turn and emits SSE turn_started.
+        closeForwardTurnModal();
+        await selectSession(targetSessionId);
+
+        const targetSess = (appStore.sessions || []).find((s) => s.id === targetSessionId);
+        const sessName = targetSess ? targetSess.name : 'target session';
+        showToast(`Forwarded to "${sessName}"`, 'success');
+
+        const forwardRes = await api.forwardTurn(turnId, payload);
+
+        // Ensure newly created running turn is in activeSessionTurns if SSE turn_started was delayed
+        if (forwardRes && forwardRes.turn_id && appStore.activeSessionId === targetSessionId) {
+          const alreadyRegistered = (appStore.activeSessionTurns || []).some((t) => t.id === forwardRes.turn_id);
+          if (!alreadyRegistered) {
+            try {
+              const turnDetail = await api.getTurn(forwardRes.turn_id);
+              if (turnDetail && turnDetail.turn && appStore.activeSessionId === targetSessionId) {
+                if (!appStore.activeSessionTurns.some((t) => t.id === forwardRes.turn_id)) {
+                  appStore.activeSessionTurns.push(turnDetail.turn);
+                  const transcript = document.getElementById('chat-transcript');
+                  if (transcript) {
+                    const emptyPlaceholder = transcript.querySelector('.sessions-empty-state');
+                    if (emptyPlaceholder) {
+                      transcript.innerHTML = '';
+                    }
+                    const existingPair = document.getElementById(`turn-pair-${turnDetail.turn.id}`);
+                    if (!existingPair) {
+                      transcript.insertAdjacentHTML('beforeend', buildTurnPairHtml(turnDetail.turn));
+                    }
+                    scrollTranscriptToBottom(true);
+                  }
+                }
+              }
+            } catch (_) {}
+          }
+        }
+      } catch (err) {
+        showToast(err.detail || err.message || 'Failed to forward turn', 'error');
+      } finally {
+        if (submitBtn) {
+          submitBtn.disabled = false;
+          submitBtn.textContent = 'Send';
+        }
+      }
+    });
+  }
+
+  // Continue in Pipeline Modal event handlers
+  const pipeModal = document.getElementById('continue-pipeline-modal');
+  const btnClosePipe = document.getElementById('btn-close-pipeline-modal');
+  const btnCancelPipe = document.getElementById('btn-cancel-pipeline-modal');
+  const pipeSelect = document.getElementById('continue-pipeline-select');
+  const pipeForm = document.getElementById('continue-pipeline-form');
+
+  if (btnClosePipe) {
+    btnClosePipe.addEventListener('click', closeContinuePipelineModal);
+  }
+  if (btnCancelPipe) {
+    btnCancelPipe.addEventListener('click', closeContinuePipelineModal);
+  }
+  if (pipeModal) {
+    pipeModal.addEventListener('click', (e) => {
+      if (e.target === pipeModal) {
+        closeContinuePipelineModal();
+      }
+    });
+  }
+  if (pipeSelect) {
+    pipeSelect.addEventListener('change', () => {
+      populatePipelineStagesForModal(pipeSelect.value);
+    });
+  }
+
+  if (pipeForm) {
+    pipeForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const turnId = document.getElementById('pipeline-source-turn-id')?.value;
+      const pipelineId = document.getElementById('continue-pipeline-select')?.value;
+      const stageSelect = document.getElementById('continue-pipeline-stage-select');
+      const startStageIndex = stageSelect ? parseInt(stageSelect.value, 10) : 0;
+      const taskPrompt = (document.getElementById('continue-pipeline-task-prompt')?.value || '').trim();
+      const errorBox = document.getElementById('continue-pipeline-error');
+      const submitBtn = document.getElementById('btn-submit-pipeline-start');
+
+      if (!turnId || !pipelineId) return;
+
+      if (startStageIndex === 0) {
+        if (errorBox) {
+          errorBox.textContent = 'Please choose Stage 2 or later. Stage 1 cannot receive handoff input.';
+          errorBox.classList.remove('hidden');
+        }
+        return;
+      }
+
+      if (errorBox) {
+        errorBox.textContent = '';
+        errorBox.classList.add('hidden');
+      }
+
+      if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Starting...';
+      }
+
+      try {
+        const payload = {
+          task_prompt: taskPrompt,
+          start_stage_index: startStageIndex,
+          initial_input_turn_id: turnId,
+        };
+
+        const res = await api.startPipelineRun(pipelineId, payload);
+        closeContinuePipelineModal();
+        showToast('Pipeline run started', 'success');
+
+        if (res && res.run) {
+          appStore.activeRunId = res.run.id;
+          appStore.activeRunDetail = res;
+        }
+
+        if (appCallbacks.switchView) {
+          appCallbacks.switchView('pipelines', {
+            runId: res && res.run ? res.run.id : undefined,
+            pipelineId,
+          });
+        }
+
+        const pipeSubtabRun = document.getElementById('pipe-subtab-run');
+        if (pipeSubtabRun) {
+          pipeSubtabRun.click();
+        }
+      } catch (err) {
+        if (errorBox) {
+          errorBox.textContent = err.detail || err.message || 'Failed to start pipeline run';
+          errorBox.classList.remove('hidden');
+        } else {
+          showToast(err.detail || err.message || 'Failed to start pipeline run', 'error');
+        }
+      } finally {
+        if (submitBtn) {
+          submitBtn.disabled = false;
+          submitBtn.textContent = 'Start';
+        }
+      }
+    });
+  }
 }
 
 export default {
@@ -1296,5 +1782,7 @@ export default {
   renderSessionsSidebar,
   renderSessionChatView,
   openNewSessionModal,
+  openForwardTurnModal,
+  openContinuePipelineModal,
   handleSessionSseEvent,
 };
