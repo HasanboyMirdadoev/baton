@@ -7,23 +7,31 @@ import os
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional
 
-from fastapi import APIRouter, FastAPI, Request, status
+from fastapi import APIRouter, FastAPI, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend.config import AppConfig, load_config, validate_working_dir
 from backend.db import Database
 from backend.models import (
+    AnswerTeamQuestionsRequest,
     ApprovePipelineRunRequest,
     ConflictError,
     CreateSessionRequest,
     ForwardTurnRequest,
     NotFoundError,
     PermissionLevel,
+    ResumeTeamRunRequest,
+    ReviewTeamMockupRequest,
+    RoleId,
     SavePipelineRequest,
+    SaveTeamRequest,
     SessionStatus,
+    SignoffTeamRunRequest,
     StartPipelineRunRequest,
+    StartTeamRunRequest,
     StartTurnRequest,
+    TeamRunStatus,
     TurnStatus,
     UnprocessableError,
     UpdateSessionRequest,
@@ -36,8 +44,15 @@ from backend.pipeline_engine import (
 )
 from backend.providers import list_providers_metadata
 from backend.pubsub import EventBus
-from backend.roles import ROLE_DEFINITIONS, get_role_label
+from backend.roles import (
+    DEFAULT_TEAM_MEMBERS,
+    ROLE_DEFINITIONS,
+    TEAM_ROLE_DEFINITIONS,
+    get_role_label,
+)
 from backend.session_manager import SessionManager
+from backend.team_engine import TeamEngine
+from backend.worktree_manager import finalize_workspace
 
 # --- Exception Handlers ---
 
@@ -111,6 +126,32 @@ def get_pipeline_engine(request: Request) -> PipelineEngine:
     return pe
 
 
+def get_team_engine(request: Request) -> TeamEngine:
+    te = getattr(request.app.state, "team_engine", None)
+    if te is None:
+        cfg = get_config(request)
+        db = get_db(request)
+        bus = get_bus(request)
+        sm = get_session_manager(request)
+        te = TeamEngine(db, sm, bus, cfg)
+        request.app.state.team_engine = te
+    return te
+
+
+MOCKUP_CSP: str = (
+    # `sandbox` gives the mockup an opaque origin even when opened as a top-level page
+    # ("Open in new tab"), so its scripts can never act with Baton's origin.
+    "sandbox allow-scripts; "
+    "default-src 'none'; "
+    "style-src 'unsafe-inline'; "
+    "script-src 'unsafe-inline'; "
+    "img-src data: blob:; "
+    "font-src data:; "
+    "connect-src 'none'; "
+    "frame-ancestors 'self';"
+)
+
+
 # --- API Routes ---
 
 api_router = APIRouter()
@@ -129,10 +170,25 @@ async def get_meta(request: Request) -> Dict[str, Any]:
         }
         for r in ROLE_DEFINITIONS.values()
     ]
+    team_roles_list = [
+        {
+            "id": r.id.value,
+            "name": r.name,
+            "description": r.description,
+            "default_provider": r.default_provider or "claude",
+            "default_model": r.default_model or "sonnet",
+            "default_permission": r.default_permission.value,
+            "system_prompt": r.system_prompt,
+        }
+        for r in TEAM_ROLE_DEFINITIONS.values()
+    ]
     return {
         "default_working_dir": os.getcwd(),
         "providers": await list_providers_metadata(cfg),
         "roles": roles_list,
+        "team_roles": team_roles_list,
+        "default_team": DEFAULT_TEAM_MEMBERS,
+        "default_team_members": DEFAULT_TEAM_MEMBERS,
         "permissions": [
             {
                 "id": PermissionLevel.READONLY.value,
@@ -474,6 +530,218 @@ async def stop_pipeline_run(request: Request, run_id: str) -> Dict[str, Any]:
     return result
 
 
+# --- Team Configuration Endpoints ---
+
+@api_router.get("/api/teams")
+async def list_teams(request: Request) -> Dict[str, Any]:
+    db = get_db(request)
+    return {"teams": db.list_teams()}
+
+
+@api_router.post("/api/teams", status_code=status.HTTP_201_CREATED)
+async def create_team(request: Request, req: SaveTeamRequest) -> Dict[str, Any]:
+    db = get_db(request)
+    members_dicts = [m.model_dump() for m in req.members] if req.members else []
+    normalized_members = TeamEngine.normalize_team_members(members_dicts)
+    team = db.create_team(
+        name=req.name,
+        description=req.description,
+        max_rework_loops=req.max_rework_loops,
+        max_question_rounds=req.max_question_rounds,
+        max_total_turns=req.max_total_turns,
+        turn_timeout_sec=req.turn_timeout_sec,
+        run_timeout_sec=req.run_timeout_sec,
+        auto_approve_mockup=req.auto_approve_mockup,
+        members=normalized_members,
+    )
+    return team
+
+
+@api_router.get("/api/teams/{team_id}")
+async def get_team(request: Request, team_id: str) -> Dict[str, Any]:
+    db = get_db(request)
+    team = db.get_team(team_id)
+    if team is None:
+        raise NotFoundError(f"Team {team_id} not found")
+    return team
+
+
+@api_router.put("/api/teams/{team_id}")
+async def update_team(
+    request: Request, team_id: str, req: SaveTeamRequest
+) -> Dict[str, Any]:
+    db = get_db(request)
+    existing = db.get_team(team_id)
+    if existing is None:
+        raise NotFoundError(f"Team {team_id} not found")
+
+    members_dicts = [m.model_dump() for m in req.members] if req.members else []
+    normalized_members = TeamEngine.normalize_team_members(members_dicts)
+    updated = db.update_team(
+        team_id=team_id,
+        name=req.name,
+        description=req.description,
+        max_rework_loops=req.max_rework_loops,
+        max_question_rounds=req.max_question_rounds,
+        max_total_turns=req.max_total_turns,
+        turn_timeout_sec=req.turn_timeout_sec,
+        run_timeout_sec=req.run_timeout_sec,
+        auto_approve_mockup=req.auto_approve_mockup,
+        members=normalized_members,
+    )
+    if updated is None:
+        raise NotFoundError(f"Team {team_id} not found")
+    return updated
+
+
+@api_router.delete("/api/teams/{team_id}")
+async def delete_team(request: Request, team_id: str) -> Dict[str, Any]:
+    db = get_db(request)
+    team = db.get_team(team_id)
+    if team is None:
+        raise NotFoundError(f"Team {team_id} not found")
+
+    if db.count_teams() <= 1:
+        raise ConflictError("Cannot delete the last remaining team")
+
+    if db.has_active_team_runs(team_id):
+        raise ConflictError(
+            f"Team {team_id} has active runs and cannot be deleted"
+        )
+
+    db.delete_team(team_id)
+    return {"deleted": True, "team_id": team_id}
+
+
+# --- Team Run Lifecycle Endpoints ---
+
+@api_router.post(
+    "/api/teams/{team_id}/runs", status_code=status.HTTP_202_ACCEPTED
+)
+async def start_team_run_for_team(
+    request: Request, team_id: str, req: StartTeamRunRequest
+) -> Dict[str, Any]:
+    te = get_team_engine(request)
+    result = await te.start_team_run(team_id_or_request=team_id, request=req)
+    return result
+
+
+@api_router.post("/api/team-runs", status_code=status.HTTP_202_ACCEPTED)
+async def start_team_run(
+    request: Request, req: StartTeamRunRequest
+) -> Dict[str, Any]:
+    te = get_team_engine(request)
+    result = await te.start_team_run(team_id_or_request=req)
+    return result
+
+
+@api_router.get("/api/team-runs")
+async def list_team_runs(request: Request) -> Dict[str, Any]:
+    te = get_team_engine(request)
+    return {"runs": te.list_team_runs()}
+
+
+@api_router.get("/api/team-runs/{run_id}")
+async def get_team_run(request: Request, run_id: str) -> Dict[str, Any]:
+    te = get_team_engine(request)
+    return te.get_run_detail(run_id)
+
+
+@api_router.delete("/api/team-runs/{run_id}")
+async def delete_team_run(request: Request, run_id: str) -> Dict[str, Any]:
+    db = get_db(request)
+    te = get_team_engine(request)
+    run = db.get_team_run(run_id)
+    if run is None:
+        raise NotFoundError(f"Team run {run_id} not found")
+    if run.get("status") in (
+        TeamRunStatus.RUNNING.value,
+        TeamRunStatus.WAITING_USER.value,
+    ):
+        await te.stop_run(run_id)
+    run = db.get_team_run(run_id) or run
+    if not run.get("resolution"):
+        # Remove the run's worktree and baton/<run_id> branch from the user's repo;
+        # otherwise they outlive the run with nothing in the UI pointing at them.
+        await asyncio.to_thread(finalize_workspace, run, "discard")
+    deleted = db.delete_team_run(run_id)
+    return {"deleted": deleted, "run_id": run_id}
+
+
+# --- Team Run Touchpoint & Inspection Endpoints ---
+
+@api_router.post("/api/team-runs/{run_id}/answer")
+async def answer_team_questions(
+    request: Request, run_id: str, req: AnswerTeamQuestionsRequest
+) -> Dict[str, Any]:
+    te = get_team_engine(request)
+    result = await te.answer_questions(run_id, req)
+    return result
+
+
+@api_router.post("/api/team-runs/{run_id}/mockup-review")
+async def review_team_mockup(
+    request: Request, run_id: str, req: ReviewTeamMockupRequest
+) -> Dict[str, Any]:
+    te = get_team_engine(request)
+    result = await te.review_mockup(run_id, req)
+    return result
+
+
+@api_router.get("/api/team-runs/{run_id}/mockup")
+async def get_team_run_mockup(
+    request: Request, run_id: str, v: Optional[int] = None
+) -> Response:
+    te = get_team_engine(request)
+    mockup_path = te.get_mockup_path(run_id, version=v)
+    try:
+        content = mockup_path.read_bytes()
+    except OSError as exc:
+        raise NotFoundError(f"Unable to read mockup file: {exc}")
+    headers = {
+        "Content-Security-Policy": MOCKUP_CSP,
+        "X-Content-Type-Options": "nosniff",
+        "Cache-Control": "no-store",
+    }
+    return Response(
+        content=content,
+        media_type="text/html; charset=utf-8",
+        headers=headers,
+    )
+
+
+@api_router.get("/api/team-runs/{run_id}/diff")
+async def get_team_run_diff(request: Request, run_id: str) -> Dict[str, Any]:
+    te = get_team_engine(request)
+    result = await te.get_run_diff(run_id)
+    return result
+
+
+@api_router.post("/api/team-runs/{run_id}/resume")
+async def resume_team_run(
+    request: Request, run_id: str, req: ResumeTeamRunRequest
+) -> Dict[str, Any]:
+    te = get_team_engine(request)
+    result = await te.resume_run(run_id, req)
+    return result
+
+
+@api_router.post("/api/team-runs/{run_id}/signoff")
+async def signoff_team_run(
+    request: Request, run_id: str, req: SignoffTeamRunRequest
+) -> Dict[str, Any]:
+    te = get_team_engine(request)
+    result = await te.signoff_run(run_id, req)
+    return result
+
+
+@api_router.post("/api/team-runs/{run_id}/stop")
+async def stop_team_run(request: Request, run_id: str) -> Dict[str, Any]:
+    te = get_team_engine(request)
+    result = await te.stop_run(run_id)
+    return result
+
+
 @api_router.get("/api/events")
 async def sse_events(request: Request) -> StreamingResponse:
     bus = get_bus(request)
@@ -515,15 +783,21 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
         pipeline_engine = getattr(app.state, "pipeline_engine", None) or PipelineEngine(
             db, session_manager, bus
         )
+        team_engine = getattr(app.state, "team_engine", None) or TeamEngine(
+            db, session_manager, bus, cfg
+        )
 
         app.state.db = db
         app.state.bus = bus
         app.state.session_manager = session_manager
         app.state.pipeline_engine = pipeline_engine
+        app.state.team_engine = team_engine
 
         try:
             yield
         finally:
+            # Let active team runs survive a restart as resumable 'interrupted' runs.
+            team_engine.shutdown()
             await session_manager.stop_all()
 
     app = FastAPI(title="Agent Relay", lifespan=lifespan)

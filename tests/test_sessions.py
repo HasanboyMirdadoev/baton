@@ -274,3 +274,54 @@ def test_oversized_stream_line_does_not_hang_or_crash_turn(
         assert eof_line == b""
 
     asyncio.run(_run())
+
+
+def test_spawned_session_subprocess_receives_baton_python(
+    db: Database,
+    session_manager: SessionManager,
+    workspace_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sys
+
+    captured: dict = {}
+    real_exec = asyncio.create_subprocess_exec
+
+    async def _spy(*args, **kwargs):  # type: ignore[no-untyped-def]
+        captured["env"] = kwargs.get("env")
+        return await real_exec(*args, **kwargs)
+
+    monkeypatch.setattr("backend.session_manager.asyncio.create_subprocess_exec", _spy)
+
+    async def _run() -> None:
+        sess = db.create_session(
+            name="Env Check",
+            provider="claude",
+            model="sonnet",
+            role="planner",
+            custom_prompt="",
+            permission_level="readonly",
+            working_dir=str(workspace_dir),
+        )
+        await session_manager.run_turn_and_wait(sess["id"], "hello")
+
+    asyncio.run(_run())
+    env = captured["env"]
+    assert env is not None
+    assert env["BATON_PYTHON"] == sys.executable
+    assert Path(env["BATON_PYTHON"]).is_absolute()
+    # The venv must not be forced onto PATH: agents keep the target project's python.
+    assert env.get("PATH") == __import__("os").environ.get("PATH")
+
+
+def test_ui_checker_prompt_mentions_baton_python() -> None:
+    from backend.roles import resolve_team_system_prompt
+    from backend.team_protocol import BATON_BROWSER_HELPER_SOURCE, build_prompt_t10_ui_checker
+
+    assert "$BATON_PYTHON" in resolve_team_system_prompt("ui_checker")
+    prompt = build_prompt_t10_ui_checker(
+        task_prompt="t", allocated_port=9999, app_run=None,
+        implementer_output_excerpt="", plan_excerpt="",
+    )
+    assert '"$BATON_PYTHON" .baton/ui_check.py' in prompt
+    assert "$BATON_PYTHON" in BATON_BROWSER_HELPER_SOURCE

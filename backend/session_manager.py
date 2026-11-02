@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import sys
 import time
 from typing import Any, Dict, List, Optional, Set
 
@@ -22,7 +23,11 @@ from backend.models import (
 )
 from backend.providers import StreamParseState, get_adapter
 from backend.pubsub import EventBus
-from backend.roles import resolve_system_prompt
+from backend.roles import (
+    ROLE_DEFINITIONS,
+    resolve_system_prompt,
+    resolve_team_system_prompt,
+)
 
 _STREAM_READER_LIMIT = 32 * 1024 * 1024  # 32 MiB
 
@@ -78,6 +83,7 @@ class SessionManager:
         pipeline_run_id: Optional[str] = None,
         stage_run_id: Optional[str] = None,
         timeout_sec: Optional[int] = None,
+        team_run_id: Optional[str] = None,
     ) -> str:
         """
         Validates session exists and is not currently running.
@@ -96,6 +102,7 @@ class SessionManager:
             prompt=prompt,
             pipeline_run_id=pipeline_run_id,
             stage_run_id=stage_run_id,
+            team_run_id=team_run_id,
         )
         turn_id: str = turn["id"]
         self._active_session_turns[session_id] = turn_id
@@ -119,10 +126,11 @@ class SessionManager:
         pipeline_run_id: Optional[str] = None,
         stage_run_id: Optional[str] = None,
         timeout_sec: Optional[int] = None,
+        team_run_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Used by PipelineEngine: starts a turn and awaits its completion, returning the final
-        turn record dict from SQLite.
+        Used by PipelineEngine and TeamEngine: starts a turn and awaits its completion, returning
+        the final turn record dict from SQLite.
         """
         turn_id = await self.start_turn(
             session_id=session_id,
@@ -130,6 +138,7 @@ class SessionManager:
             pipeline_run_id=pipeline_run_id,
             stage_run_id=stage_run_id,
             timeout_sec=timeout_sec,
+            team_run_id=team_run_id,
         )
         task = self._active_tasks.get(turn_id)
         if task is not None:
@@ -181,9 +190,19 @@ class SessionManager:
 
         adapter = get_adapter(ProviderId(session["provider"]), self.config)
         is_first_turn = session.get("provider_session_id") is None
-        sys_prompt = resolve_system_prompt(
-            RoleId(session["role"]), session.get("custom_prompt")
-        )
+        role_enum = RoleId(session["role"])
+        if (
+            session.get("team_run_id")
+            or turn.get("team_run_id")
+            or role_enum not in ROLE_DEFINITIONS
+        ):
+            sys_prompt = resolve_team_system_prompt(
+                role_enum, session.get("custom_prompt")
+            )
+        else:
+            sys_prompt = resolve_system_prompt(
+                role_enum, session.get("custom_prompt")
+            )
         cmd = adapter.build_command(
             prompt=turn["prompt"],
             model=session["model"],
@@ -218,6 +237,7 @@ class SessionManager:
                         stderr=asyncio.subprocess.PIPE,
                         limit=_STREAM_READER_LIMIT,
                         start_new_session=True,
+                        env={**os.environ, "BATON_PYTHON": sys.executable},
                     )
                     self._active_procs[session_id] = proc
                 except Exception as exc:
@@ -263,6 +283,9 @@ class SessionManager:
                                         "turn_id": turn_id,
                                         "pipeline_run_id": turn.get("pipeline_run_id"),
                                         "stage_run_id": turn.get("stage_run_id"),
+                                        "team_run_id": turn.get("team_run_id")
+                                        or session.get("team_run_id"),
+                                        "role": session.get("role"),
                                         "event": event.model_dump(),
                                     },
                                 )

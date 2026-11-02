@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import shutil
+import subprocess
 from typing import Iterator
 
 from fastapi.testclient import TestClient
@@ -13,6 +15,7 @@ from backend.main import create_app
 from backend.pipeline_engine import PipelineEngine
 from backend.pubsub import EventBus
 from backend.session_manager import SessionManager
+from backend.team_engine import TeamEngine
 
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 FAKE_CLAUDE_BIN = FIXTURES_DIR / "fake_claude.py"
@@ -79,3 +82,85 @@ def client(app_config: AppConfig) -> Iterator[TestClient]:
     app = create_app(app_config)
     with TestClient(app) as test_client:
         yield test_client
+
+
+@pytest.fixture
+def team_engine(
+    app_config: AppConfig, db: Database, session_manager: SessionManager, bus: EventBus
+) -> TeamEngine:
+    return TeamEngine(db, session_manager, bus, app_config)
+
+
+def git_cmd(repo: Path, *args: str) -> str:
+    """Runs git in `repo` with a fixed identity and no signing; returns stdout."""
+    res = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=Baton Test",
+            "-c",
+            "user.email=baton-test@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            *args,
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return res.stdout
+
+
+def _cleanup_git_repo(repo: Path) -> None:
+    # Remove any linked worktrees before deleting the repository itself.
+    if (repo / ".git").exists():
+        listing = subprocess.run(
+            ["git", "-C", str(repo), "worktree", "list", "--porcelain"],
+            capture_output=True,
+            text=True,
+        ).stdout
+        main_wt = os.path.realpath(str(repo))
+        for line in listing.splitlines():
+            if line.startswith("worktree "):
+                wt = line[len("worktree ") :].strip()
+                if os.path.realpath(wt) != main_wt:
+                    subprocess.run(
+                        ["git", "-C", str(repo), "worktree", "remove", "--force", wt],
+                        capture_output=True,
+                    )
+        subprocess.run(["git", "-C", str(repo), "worktree", "prune"], capture_output=True)
+    shutil.rmtree(repo, ignore_errors=True)
+
+
+@pytest.fixture
+def git_repo(tmp_path: Path) -> Iterator[Path]:
+    """Temp git repository on branch `main` with one commit (README.md)."""
+    repo = tmp_path / "target_repo"
+    repo.mkdir(parents=True, exist_ok=True)
+    git_cmd(repo, "init", "-q", "-b", "main")
+    (repo / "README.md").write_text("# Target repo\n", encoding="utf-8")
+    git_cmd(repo, "add", "-A")
+    git_cmd(repo, "commit", "-q", "-m", "Initial commit")
+    yield repo
+    _cleanup_git_repo(repo)
+
+
+@pytest.fixture
+def empty_git_repo(tmp_path: Path) -> Iterator[Path]:
+    """Temp git repository with no commits."""
+    repo = tmp_path / "empty_repo"
+    repo.mkdir(parents=True, exist_ok=True)
+    git_cmd(repo, "init", "-q", "-b", "main")
+    yield repo
+    _cleanup_git_repo(repo)
+
+
+@pytest.fixture
+def non_git_dir(tmp_path: Path) -> Path:
+    """Plain folder that is not inside any git work tree."""
+    folder = tmp_path / "plain_folder"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "file.txt").write_text("hello\n", encoding="utf-8")
+    return folder
