@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Agent Relay</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div id="app-container">
+    <!-- 52px Top Navigation Bar -->
+    <header id="top-bar">
+      <div class="brand-wrapper">
+        <div class="brand-title">
+          <span class="brand-icon">⚡</span>
+          <span>Agent Relay</span>
+        </div>
+      </div>
+
+      <nav class="nav-tabs" aria-label="Main Navigation">
+        <button type="button" class="nav-tab-btn active" id="nav-tab-sessions">
+          <span>💬</span>
+          <span>Sessions</span>
+        </button>
+        <button type="button" class="nav-tab-btn" id="nav-tab-pipelines">
+          <span>🔗</span>
+          <span>Pipelines</span>
+        </button>
+        <button type="button" class="nav-tab-btn" id="nav-tab-history">
+          <span>🕓</span>
+          <span>Run History</span>
+        </button>
+      </nav>
+
+      <div class="top-bar-right">
+        <div id="sse-status-indicator" title="SSE connection status">
+          <span class="status-dot idle"></span>
+          <span class="sse-status-text">Connecting...</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- App Body (Sidebar + Main Workspace) -->
+    <div id="main-body">
+      <!-- Persistent Left Sidebar: Sessions List -->
+      <aside id="sessions-sidebar" aria-label="Sessions Sidebar">
+        <div class="sidebar-header">
+          <span class="sidebar-title">Sessions</span>
+          <button type="button" id="btn-new-session" title="Create a new session">
+            <span>+</span>
+            <span>New Session</span>
+          </button>
+        </div>
+
+        <div id="sessions-list" role="list">
+          <!-- Populated dynamically by sessions.js -->
+          <div class="sessions-empty-state">
+            <p>No sessions yet. Create a Claude or Antigravity session to start chatting or building pipelines.</p>
+            <button type="button" class="btn-secondary" id="btn-create-first-session">+ Create First Session</button>
+          </div>
+        </div>
+      </aside>
+
+      <!-- Main Workspace -->
+      <main id="main-workspace">
+        <!-- View 1: Sessions & Live Chat View -->
+        <section id="view-sessions" class="view-panel" aria-label="Session View">
+          <!-- Empty State (No Session Selected) -->
+          <div id="session-chat-empty">
+            <div class="empty-icon">💬</div>
+            <h2>No Session Selected</h2>
+            <p>Select an existing session from the sidebar or create a new one to begin chatting.</p>
+          </div>
+
+          <!-- Active Session Chat Container -->
+          <div id="session-chat-active" class="hidden">
+            <!-- Session Header Bar -->
+            <div id="session-header">
+              <div class="session-header-left">
+                <span id="session-header-name" class="session-header-title">Session</span>
+                <span id="session-header-status"></span>
+                <span id="session-header-provider"></span>
+                <span id="session-header-model" class="badge-mono"></span>
+                <span id="session-header-role"></span>
+              </div>
+
+              <div class="session-header-mid">
+                <span id="session-header-cwd" class="header-cwd" title="Working Directory"></span>
+                <span id="session-header-conv-id" class="header-conv-id">not started</span>
+              </div>
+
+              <div class="session-header-right">
+                <label for="session-permission-override" class="form-hint" style="margin-right: 4px;">Permission:</label>
+                <select id="session-permission-override" class="select-compact" title="Quick permission override">
+                  <option value="readonly">Read-Only</option>
+                  <option value="edit">Edit Files</option>
+                  <option value="full">Full Access</option>
+                </select>
+                <button type="button" id="btn-delete-session" class="btn-icon-danger" title="Delete Session">🗑</button>
+              </div>
+            </div>
+
+            <!-- Scrollable Chat Transcript -->
+            <div id="chat-transcript" role="log" aria-live="polite">
+              <!-- Turns and live streaming deltas rendered here -->
+            </div>
+
+            <!-- Composer Bar -->
+            <form id="session-prompt-form" onsubmit="return false;">
+              <textarea
+                id="session-prompt-input"
+                placeholder="Type instructions or task prompt... (Press ⌘↵ or Ctrl↵ to send)"
+                rows="3"
+                required
+              ></textarea>
+              <div class="composer-actions-bar">
+                <span class="composer-hint">Press <strong>⌘↵</strong> or <strong>Ctrl↵</strong> to send</span>
+                <div class="composer-buttons">
+                  <span id="turn-timer" class="turn-elapsed-timer hidden">Running... 00:00</span>
+                  <button type="submit" id="btn-send-turn">Send Turn (⌘↵)</button>
+                  <button type="button" id="btn-stop-turn" class="hidden">■ Stop Turn</button>
+                </div>
+              </div>
+            </form>
+          </div>
+        </section>
+
+        <!-- View 2: Pipelines & Live Run View -->
+        <section id="view-pipelines" class="view-panel hidden" aria-label="Pipelines View">
+          <!-- Mobile / Compact Subtab Bar (shown <= 1024px) -->
+          <div class="pipe-subtab-bar" id="pipe-subtab-bar">
+            <button type="button" class="pipe-subtab-btn active" id="pipe-subtab-builder">Pipeline Builder</button>
+            <button type="button" class="pipe-subtab-btn" id="pipe-subtab-run">Active Run</button>
+          </div>
+
+          <div class="pipelines-split-layout">
+            <!-- Panel 1: Pipeline Builder & Launcher -->
+            <div id="pipeline-builder-panel">
+              <div class="panel-title">Pipeline Configuration</div>
+
+              <div class="pipeline-select-row">
+                <select id="pipeline-select" class="select-input" title="Select a saved pipeline">
+                  <option value="">-- New Pipeline --</option>
+                </select>
+                <button type="button" class="btn-secondary" id="btn-new-pipeline" title="Create new pipeline">+ New</button>
+                <button type="button" class="btn-icon-danger" id="btn-delete-pipeline" title="Delete pipeline">🗑</button>
+              </div>
+
+              <div class="form-group">
+                <label for="pipeline-name-input" class="form-label">Pipeline Name</label>
+                <input type="text" id="pipeline-name-input" class="input-text" placeholder="e.g., Feature Pipeline (Design → Plan → Code → Review)" required>
+              </div>
+
+              <div class="form-group">
+                <label for="pipeline-desc-input" class="form-label">Description (optional)</label>
+                <input type="text" id="pipeline-desc-input" class="input-text" placeholder="Short description of this workflow">
+              </div>
+
+              <div class="form-group">
+                <label for="pipeline-max-loops-input" class="form-label">Max Review Loops</label>
+                <input type="number" id="pipeline-max-loops-input" class="input-text" min="0" max="5" value="2">
+                <span class="form-hint">On CHANGES_REQUESTED, findings return to Implementer up to N loops.</span>
+              </div>
+
+              <div class="form-group">
+                <label class="form-label">Ordered Stages</label>
+                <div id="pipeline-stages-list">
+                  <!-- Stage editor rows injected here -->
+                </div>
+              </div>
+
+              <div class="builder-actions-row">
+                <button type="button" class="btn-secondary" id="btn-add-stage">+ Add Stage</button>
+                <button type="button" class="btn-secondary" id="btn-autofill-pipeline">Auto-Fill 4-Stage Pipeline</button>
+                <button type="button" class="btn-primary" id="btn-save-pipeline">Save Pipeline</button>
+              </div>
+
+              <!-- Task Launch Card at Bottom -->
+              <div class="task-launch-card">
+                <label for="pipeline-task-input" class="form-label">Launch Task</label>
+                <textarea id="pipeline-task-input" placeholder="Enter the task prompt for Stage 1..." rows="3"></textarea>
+                <button type="button" id="btn-run-pipeline">▶ Run Pipeline</button>
+              </div>
+            </div>
+
+            <!-- Panel 2: Active Pipeline Run View -->
+            <div id="pipeline-active-run-panel">
+              <div id="pipeline-empty-run" class="sessions-empty-state">
+                <p>No active pipeline run. Configure stages on the left and click "▶ Run Pipeline" to launch.</p>
+              </div>
+
+              <div id="pipeline-run-container" class="hidden">
+                <!-- Run Summary Header -->
+                <div class="run-summary-header" id="pipeline-run-header">
+                  <div class="run-summary-top">
+                    <div class="run-pipeline-title" id="run-header-title">Pipeline Run</div>
+                    <div class="run-badges-group">
+                      <span id="run-header-status"></span>
+                      <span id="run-header-loop" class="stage-iteration-pill hidden">Review Loop: 0 / 2</span>
+                      <span id="run-header-timer" class="turn-elapsed-timer">00:00</span>
+                      <button type="button" class="btn-stop-pipeline hidden" id="btn-stop-pipeline">■ Stop Pipeline</button>
+                    </div>
+                  </div>
+                  <details class="thinking-block" id="run-task-prompt-details">
+                    <summary>Original Task Prompt</summary>
+                    <div class="thinking-body" id="run-task-prompt-text"></div>
+                  </details>
+                </div>
+
+                <!-- Sticky Approval Banner (visible only when waiting_approval) -->
+                <div id="pipeline-approval-banner" class="hidden">
+                  <div class="approval-banner-title">
+                    <span>⏸</span>
+                    <span id="approval-banner-message">Paused for approval</span>
+                  </div>
+                  <input
+                    type="text"
+                    id="pipeline-approval-note"
+                    placeholder="Add an optional note or instruction for the next stage..."
+                  >
+                  <div class="approval-actions-row">
+                    <button type="button" id="btn-approve-pipeline">✓ Approve & Continue</button>
+                    <button type="button" class="btn-stop-pipeline" id="btn-stop-approval-pipeline">■ Stop Pipeline</button>
+                  </div>
+                </div>
+
+                <!-- Live Per-Stage Timeline -->
+                <div id="stage-runs-timeline">
+                  <!-- Stage run cards injected here -->
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- View 3: Run History Browser -->
+        <section id="view-history" class="view-panel hidden" aria-label="Run History View">
+          <div class="history-split-layout">
+            <!-- Left Column: Filterable History List -->
+            <div id="history-list-panel">
+              <div class="history-tabs-row">
+                <button type="button" class="history-tab-btn active" id="history-tab-runs">Pipeline Runs</button>
+                <button type="button" class="history-tab-btn" id="history-tab-turns">All Session Turns</button>
+              </div>
+              <div id="history-items-list" role="list">
+                <!-- History cards injected here -->
+              </div>
+            </div>
+
+            <!-- Right Column: Historical Run / Turn Inspector -->
+            <div id="history-detail-panel">
+              <div id="history-empty-detail" class="sessions-empty-state">
+                <p>Select a pipeline run or session turn from the list to inspect its prompt, tool calls, and output.</p>
+              </div>
+              <div id="history-content-detail" class="hidden">
+                <!-- Inspector detail content injected here -->
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <!-- Modal: New Session -->
+    <div id="new-session-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="modal-new-session-title">
+      <div class="modal-dialog">
+        <div class="modal-header">
+          <h2 id="modal-new-session-title" class="modal-title">Create New Session</h2>
+          <button type="button" class="modal-close-btn" id="btn-close-modal" aria-label="Close modal">&times;</button>
+        </div>
+
+        <form id="new-session-form">
+          <div class="modal-body">
+            <!-- Inline Error Box -->
+            <div id="new-session-error" class="modal-error-box hidden"></div>
+
+            <!-- Session Name -->
+            <div class="form-group">
+              <label for="new-session-name" class="form-label">Session Name</label>
+              <input type="text" id="new-session-name" name="name" class="input-text" placeholder="e.g., AGY Implementer" required>
+            </div>
+
+            <!-- Provider Toggle -->
+            <div class="form-group">
+              <label class="form-label">CLI Provider</label>
+              <div class="segmented-control" role="group" aria-label="Provider Selection">
+                <button type="button" class="segmented-option active" data-provider="claude" id="provider-toggle-claude">Claude Code</button>
+                <button type="button" class="segmented-option" data-provider="antigravity" id="provider-toggle-agy">Antigravity (AGY)</button>
+              </div>
+              <input type="hidden" id="new-session-provider" name="provider" value="claude">
+            </div>
+
+            <!-- Model Selection -->
+            <div class="form-group">
+              <label for="new-session-model" class="form-label">Model</label>
+              <select id="new-session-model" name="model" class="select-input" required>
+                <!-- Populated dynamically based on selected provider -->
+              </select>
+            </div>
+
+            <!-- Custom Model Input (conditional) -->
+            <div id="new-session-custom-model-group" class="form-group hidden">
+              <label for="new-session-custom-model" class="form-label">Custom Model ID</label>
+              <input type="text" id="new-session-custom-model" class="input-text" placeholder="e.g., claude-3-7-sonnet-20250219">
+            </div>
+
+            <!-- Role Selection -->
+            <div class="form-group">
+              <label for="new-session-role" class="form-label">Engineering Role</label>
+              <select id="new-session-role" name="role" class="select-input" required>
+                <!-- Populated dynamically from meta.roles -->
+              </select>
+              <div id="new-session-role-desc" class="form-hint"></div>
+            </div>
+
+            <!-- Collapsible System Prompt Preview & Custom Prompt -->
+            <details class="thinking-block" id="new-session-prompt-details">
+              <summary>View / Append Role Prompt</summary>
+              <div style="padding-top: 8px;">
+                <div class="form-hint" style="margin-bottom: 4px;">Built-in System Prompt (Preview):</div>
+                <div id="new-session-system-prompt-preview" class="thinking-body" style="max-height: 120px;"></div>
+                <div class="form-group" style="margin-top: 8px;">
+                  <label for="new-session-custom-prompt" class="form-label">Additional Instructions (custom_prompt)</label>
+                  <textarea id="new-session-custom-prompt" name="custom_prompt" class="input-text" rows="2" placeholder="Optional instructions appended to role system prompt (or full prompt for Custom role)"></textarea>
+                </div>
+              </div>
+            </details>
+
+            <!-- Permission Level -->
+            <div class="form-group">
+              <label for="new-session-permission" class="form-label">Permission Level</label>
+              <select id="new-session-permission" name="permission_level" class="select-input">
+                <option value="readonly">Read-Only (Plan) — Cannot edit files or run commands</option>
+                <option value="edit">Edit Files (Accept Edits) — Can create and modify files</option>
+                <option value="full">Full Access (Edit + Commands) — Auto-approves all tools</option>
+              </select>
+              <div id="new-session-permission-warning" class="override-hint-banner hidden">
+                ⚠️ Override active: this role is read-only by default.
+              </div>
+            </div>
+
+            <!-- Working Directory -->
+            <div class="form-group">
+              <label for="new-session-working-dir" class="form-label">Working Directory</label>
+              <input type="text" id="new-session-working-dir" name="working_dir" class="input-text" placeholder="/path/to/workspace" required>
+              <span class="form-hint">Must be an existing local directory. Absolute or ~ paths supported.</span>
+            </div>
+          </div>
+
+          <div class="modal-footer">
+            <button type="button" class="btn-secondary" id="btn-cancel-new-session">Cancel</button>
+            <button type="submit" class="btn-primary" id="btn-submit-new-session">Create Session</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Toast Container -->
+    <div id="toast-container" aria-live="assertive"></div>
+  </div>
+
+  <!-- Entry ES Module -->
+  <script type="module" src="/js/app.js"></script>
+</body>
+</html>
