@@ -19,6 +19,8 @@ KNOWN_TRIGGERS: Tuple[str, ...] = (
     "[TEAM_ALWAYS_REJECT]",
     "[ALWAYS_REJECT]",
     "[TEAM_MOCKUP_REJECT_ONCE]",
+    "[TEAM_DENIED_ONCE]",
+    "[TEAM_DENIED_ALWAYS]",
 )
 
 
@@ -79,7 +81,7 @@ def _is_team_mode(sys_prompt: str, prompt: str) -> bool:
     for h in team_headers:
         if h in prompt:
             return True
-    if "# Format Error" in prompt and os.path.isdir(".baton"):
+    if ("# Format Error" in prompt or "# Action Denied" in prompt) and os.path.isdir(".baton"):
         return True
     return False
 
@@ -154,7 +156,7 @@ def _detect_team_role(
             return "implementer"
 
     # 4. From format error repair prompt
-    if "# Format Error" in p:
+    if "# Format Error" in p or "# Action Denied" in p:
         if "'pm'" in p or "state 'pm_" in p:
             return "pm"
         if "'ui_designer'" in p or "state 'ui_design'" in p:
@@ -178,6 +180,31 @@ def _detect_team_role(
     return "pm"
 
 
+def _team_turn_denied(
+    role: str, sys_prompt: str, prompt: str, state: Dict[str, Any]
+) -> bool:
+    """[TEAM_DENIED_ONCE]: the role's first turn is denied; [TEAM_DENIED_ALWAYS]: every turn is."""
+    triggers: List[str] = state.setdefault("triggers", [])
+    full_text = f"{sys_prompt}\n{prompt}"
+    for t in KNOWN_TRIGGERS:
+        if t in full_text and t not in triggers:
+            triggers.append(t)
+    if "[TEAM_DENIED_ALWAYS]" in triggers:
+        _save_fake_state(state)
+        return True
+    done = state.setdefault("denied_done", {})
+    if (
+        "[TEAM_DENIED_ONCE]" in triggers
+        and not done.get(role)
+        and "# Action Denied" not in prompt
+    ):
+        done[role] = True
+        _save_fake_state(state)
+        return True
+    _save_fake_state(state)
+    return False
+
+
 def _generate_team_response(
     role: str,
     sys_prompt: str,
@@ -195,6 +222,7 @@ def _generate_team_response(
     is_malformed_trigger = "[TEAM_MALFORMED_ONCE]" in triggers
     is_repair_turn = (
         "# Format Error" in prompt
+        or "# Action Denied" in prompt
         or "Missing or Invalid `baton-msg` Block" in prompt
     )
     malformed_done = state.get("malformed_done", {}).get(role, False)
@@ -673,6 +701,54 @@ def _parse_args(argv: List[str]) -> Tuple[Optional[str], str, str, str]:
     return conv_id, model, mode, prompt
 
 
+def _emit_denied_result(conv_id: str) -> int:
+    """Real headless-agy shape when a command is auto-denied: empty reply + denied_actions."""
+    params = {"CommandLine": "ls"}
+    print(
+        json.dumps(
+            {
+                "event": "step_update",
+                "step_update": {
+                    "conversation_id": conv_id,
+                    "step_index": 3,
+                    "state": "ERROR",
+                    "step_type": "tool",
+                    "tool_name": "run_command",
+                    "tool_info": {
+                        "name": "run_command",
+                        "parameters": params,
+                        "error": {
+                            "type": "TOOL_ERROR",
+                            "message": 'permission check failed for unsandboxed "ls": user denied permission to run command',
+                        },
+                    },
+                },
+            }
+        ),
+        flush=True,
+    )
+    sys.stderr.write(
+        'jetski: no output produced \u2014 a tool required the "command" permission that headless '
+        "mode cannot prompt for, so it was auto-denied.\n"
+    )
+    sys.stderr.flush()
+    print(
+        json.dumps(
+            {
+                "event": "result",
+                "result": {
+                    "conversation_id": conv_id,
+                    "status": "SUCCESS",
+                    "response": "",
+                    "denied_actions": [{"action": "command", "display_name": "RunCommand"}],
+                },
+            }
+        ),
+        flush=True,
+    )
+    return 0
+
+
 def main() -> int:
     signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(0))
 
@@ -826,9 +902,13 @@ def main() -> int:
             state["roles"] = {}
         if team_role:
             state["roles"][conv_id] = team_role
+        if _team_turn_denied(team_role or "pm", sys_prompt, user_prompt, state):
+            return _emit_denied_result(conv_id)
         response_text = _generate_team_response(
             team_role or "pm", sys_prompt, user_prompt, state
         )
+    elif "[DENIED]" in prompt:
+        return _emit_denied_result(conv_id)
     else:
         summary_header = (
             f"[agy model={model} mode={mode} resumed={is_resumed} conv={conv_id} cwd={os.path.basename(os.getcwd())}]"

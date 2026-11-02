@@ -13,6 +13,7 @@ from backend.models import (
     utc_now_iso,
 )
 from backend.providers.base import ProviderAdapter, StreamParseState
+from backend.providers.safe_commands import agy_allow_rules
 
 
 PERMISSION_FLAGS: Dict[PermissionLevel, List[str]] = {
@@ -30,6 +31,20 @@ PERMISSION_FLAGS: Dict[PermissionLevel, List[str]] = {
         "--dangerously-skip-permissions",
     ],
 }
+
+def agy_settings_json(permission: PermissionLevel) -> Optional[str]:
+    """
+    Per-session `--settings` JSON for non-full roles: allow-lists read-only shell commands,
+    because headless agy auto-denies (and silently ends the turn on) any unlisted command.
+    `full` already passes --dangerously-skip-permissions, so it gets no settings.
+    """
+    if permission == PermissionLevel.FULL:
+        return None
+    return json.dumps(
+        {"permissions": {"allow": agy_allow_rules()}},
+        separators=(",", ":"),
+    )
+
 
 FALLBACK_AGY_MODELS: List[Dict[str, str]] = [
     {"id": "gemini-4-argon-high", "label": "Gemini 4 Argon (High)"},
@@ -82,6 +97,9 @@ class AntigravityAdapter(ProviderAdapter):
             "stream-json",
         ]
         cmd.extend(perm_flags)
+        settings_json = agy_settings_json(perm_level)
+        if settings_json:
+            cmd.extend(["--settings", settings_json])
         if model and model.strip():
             cmd.extend(["--model", model])
         if not use_first_turn and provider_conversation_id:

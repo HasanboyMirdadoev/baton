@@ -595,6 +595,93 @@ def respond(role, sys_prompt, prompt, state, original):
         assert not Path(run["worktree_path"]).exists()
 
 
+def test_denied_action_gets_dedicated_repair_prompt_then_run_proceeds(
+    team_client: TestClient, git_repo: Path, team_db: Database
+) -> None:
+    # Every role's first turn ends like headless agy/claude does when a command is auto-denied:
+    # empty reply + denied_actions (claude roles: "Bash"; agy roles: "RunCommand").
+    run_id = _start_run(team_client, git_repo, "[TEAM_DENIED_ONCE] Add a feature")
+    detail = _wait_run(team_client, run_id, "waiting_final_signoff", "waiting_user")
+    assert _msg_triples(detail) == DEFAULT_FLOW
+
+    turns = team_db.list_turns_for_team_run(run_id)
+    assert not [t for t in turns if t["prompt"].startswith("# Format Error")]  # not the generic repair
+    denial_turns = [t for t in turns if t["prompt"].startswith("# Action Denied")]
+    assert {t["role"] for t in denial_turns} == {
+        "pm", "architect", "planner", "implementer", "ui_checker", "reviewer",
+    }
+    assert len(turns) == 7 + len(denial_turns)
+
+    pm_turns = _role_turns(team_db, run_id, "pm")
+    assert pm_turns[0]["denied_actions"] == ["Bash"] and pm_turns[0]["response_text"] == ""
+    assert "`Bash`" in pm_turns[1]["prompt"]
+    assert "DENIED" in pm_turns[1]["prompt"] and "read-only shell commands" in pm_turns[1]["prompt"]
+    assert "```baton-msg" in pm_turns[1]["prompt"] and "pm_triage" in pm_turns[1]["prompt"]
+    impl_turns = _role_turns(team_db, run_id, "implementer")
+    assert impl_turns[0]["denied_actions"] == ["RunCommand"]
+    assert "`RunCommand`" in impl_turns[1]["prompt"]
+    assert detail["run"]["turn_count"] == len(turns)
+
+
+def test_denial_repair_does_not_consume_the_format_repair(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, git_repo: Path
+) -> None:
+    # PM: turn 1 denied -> denial repair answered WITHOUT a block -> the normal format repair
+    # is still available and succeeds.
+    script = _scripted_claude(
+        tmp_path,
+        '''
+def respond(role, sys_prompt, prompt, state, original):
+    if role == "pm" and "# Action Denied" in prompt:
+        return "Understood, carrying on without the shell (forgot the block)."
+    return original(role, sys_prompt, prompt, state)
+''',
+    )
+    app_config = load_config()
+    with _scripted_client(monkeypatch, script) as client:
+        run_id = _start_run(client, git_repo, "[TEAM_DENIED_ONCE] Add a feature")
+        _wait_run(client, run_id, "waiting_final_signoff", "waiting_user")
+        pm_turns = _role_turns(Database(app_config.db_path), run_id, "pm")
+        assert pm_turns[0]["prompt"].startswith("# Team Run Task")
+        assert pm_turns[1]["prompt"].startswith("# Action Denied")
+        assert pm_turns[2]["prompt"].startswith("# Format Error")
+
+
+def test_repeated_denial_fails_run_naming_the_denied_action(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, git_repo: Path
+) -> None:
+    app_config = load_config()
+    with TestClient(create_app(app_config)) as client:
+        run_id = _start_run(client, git_repo, "[TEAM_DENIED_ALWAYS] Add a feature")
+        res = _wait_run(client, run_id, "failed", "failed")
+        run = res["run"]
+        assert "Role 'pm' was denied `Bash`" in run["error_message"]
+        assert "after the denial retry" in run["error_message"]
+        assert "read-only" in run["error_message"]
+        pm_turns = _role_turns(Database(app_config.db_path), run_id, "pm")
+        assert len(pm_turns) == 2  # original + exactly one denial repair, never a third
+        assert pm_turns[1]["prompt"].startswith("# Action Denied")
+        assert pm_turns[1]["denied_actions"] == ["Bash"]
+        assert res["messages"] == []
+
+
+def test_ui_designer_agy_denial_names_run_command_and_recovers(
+    team_client: TestClient, git_repo: Path, team_db: Database
+) -> None:
+    # The reported scenario: an agy role (UI Designer) is denied RunCommand and answers nothing.
+    run_id = _start_run(
+        team_client, git_repo, "[TEAM_DENIED_ONCE] [TEAM_WITH_MOCKUP] Add a settings page",
+        auto_approve_mockup=True,
+    )
+    detail = _wait_run(team_client, run_id, "waiting_final_signoff", "waiting_user")
+    designer_turns = _role_turns(team_db, run_id, "ui_designer")
+    assert designer_turns[0]["denied_actions"] == ["RunCommand"]
+    assert designer_turns[0]["response_text"] == ""
+    assert designer_turns[1]["prompt"].startswith("# Action Denied")
+    assert "`RunCommand`" in designer_turns[1]["prompt"]
+    assert ("ui_designer", "pm", "deliverable") in _msg_triples(detail)
+
+
 def test_invalid_transition_also_triggers_repair(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, git_repo: Path
 ) -> None:

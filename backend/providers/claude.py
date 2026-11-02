@@ -11,6 +11,7 @@ from backend.models import (
     utc_now_iso,
 )
 from backend.providers.base import ProviderAdapter, StreamParseState
+from backend.providers.safe_commands import claude_allowed_tools
 
 
 PERMISSION_FLAGS: Dict[PermissionLevel, List[str]] = {
@@ -20,13 +21,17 @@ PERMISSION_FLAGS: Dict[PermissionLevel, List[str]] = {
         "--permission-prompts",
         "none",
         "--disallowedTools",
-        "Edit,Write,NotebookEdit,Bash",
+        "Edit,Write,NotebookEdit",
+        "--allowedTools",
+        ",".join(claude_allowed_tools()),
     ],
     PermissionLevel.EDIT: [
         "--permission-mode",
         "acceptEdits",
         "--permission-prompts",
         "none",
+        "--allowedTools",
+        ",".join(claude_allowed_tools()),
     ],
     PermissionLevel.FULL: [
         "--permission-mode",

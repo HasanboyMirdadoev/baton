@@ -268,6 +268,25 @@ export function renderSessionsSidebar() {
 }
 
 /**
+ * Text for the denied-actions banner. When the turn finished with no reply at all, say so
+ * plainly: headless agents cannot ask for approval, so a denied command silently ends the turn.
+ * @param {Array<string>} denied
+ * @param {object} turn
+ * @param {string} replyText
+ * @returns {string}
+ */
+function deniedBannerText(denied, turn, replyText) {
+  const list = denied.join(', ');
+  const finished = turn.status && turn.status !== 'running';
+  if (finished && !String(replyText || '').trim()) {
+    return `⚠️ Turn ended because an action was denied: ${list}. Headless mode cannot ask for approval; ` +
+      'Read-only and Edit sessions may only use file tools and read-only commands (ls, cat, grep, git status/diff/log). ' +
+      'Rephrase the request, or use a Full-permission session for anything else.';
+  }
+  return `⚠️ Denied (headless mode cannot ask for approval): ${list}`;
+}
+
+/**
  * Reconstructs aggregated state from an array of NormalizedEvent items for a turn.
  * @param {Array<object>} events
  * @returns {{ thinkingText: string, textDeltaAccum: string, sawTextDelta: boolean, tools: Array<object>, deniedActions: Array<string> }}
@@ -435,7 +454,7 @@ function buildTurnAgentCardInnerHtml(turn) {
     ...agg.deniedActions,
   ]));
   const deniedHtml = mergedDenied.length > 0
-    ? `<div class="denied-actions-banner" id="turn-denied-${escapeHtml(turn.id)}">⚠️ Denied in Read-Only mode: ${escapeHtml(mergedDenied.join(', '))}</div>`
+    ? `<div class="denied-actions-banner" id="turn-denied-${escapeHtml(turn.id)}">${escapeHtml(deniedBannerText(mergedDenied, turn, responseText))}</div>`
     : `<div class="denied-actions-banner hidden" id="turn-denied-${escapeHtml(turn.id)}"></div>`;
 
   // Error or Stopped status alert
@@ -650,7 +669,7 @@ function updateLiveTurnCardDom(turnId) {
   ]));
   if (deniedEl && mergedDenied.length > 0) {
     deniedEl.classList.remove('hidden');
-    deniedEl.textContent = `⚠️ Denied in Read-Only mode: ${mergedDenied.join(', ')}`;
+    deniedEl.textContent = deniedBannerText(mergedDenied, turn, effectiveText);
   }
 
   // 5. Update Footer Tool Count

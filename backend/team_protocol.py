@@ -554,6 +554,65 @@ def build_format_repair_prompt(
     )
 
 
+def build_denied_action_repair_prompt(
+    denied_actions: Sequence[str],
+    error_or_parsed: Union[str, ParsedTeamMessage] = "",
+    stage_state: Union[TeamStageState, str] = "",
+    role: Optional[Union[RoleId, str]] = None,
+    *,
+    asking_role: Optional[Union[RoleId, str]] = None,
+    expected_json_example: Optional[str] = None,
+) -> str:
+    """
+    Repair prompt for a turn that ended with a missing/invalid `baton-msg` block because the
+    CLI auto-denied one or more actions (headless mode cannot prompt for permission).
+    Names the denied action(s) and tells the role to continue with file tools and read-only
+    commands, then end with the `baton-msg` block.
+    """
+    if isinstance(error_or_parsed, ParsedTeamMessage):
+        err_msg = error_or_parsed.error or ""
+    else:
+        err_msg = str(error_or_parsed or "").strip()
+    err_msg = err_msg or "Invalid or missing baton-msg block."
+
+    names = format_denied_actions(denied_actions)
+    stage_str = _normalize_enum_str(stage_state) or "current"
+    example_str = (
+        expected_json_example.strip()
+        if (expected_json_example and expected_json_example.strip())
+        else get_expected_json_example(role=role, stage_state=stage_state, asking_role=asking_role)
+    )
+
+    return (
+        "# Action Denied — Continue Without It\n\n"
+        f"Your previous turn tried to use {names}, which was DENIED: Baton runs you headless and "
+        "cannot prompt anyone to approve it, so the turn ended without a usable reply "
+        f"({err_msg}).\n\n"
+        "Do NOT retry the denied action, and do not try to work around it with another shell command. "
+        "Proceed using only your file tools (reading and, if your permission allows, editing files) "
+        "and read-only shell commands "
+        "(ls, find, cat, head, tail, wc, grep, rg, tree, pwd, file, git status/diff/log/show/ls-files). "
+        "Do NOT repeat analysis or redo file edits that already succeeded. Finish the task with what you "
+        "have, then end your response with a valid `baton-msg` fenced JSON block matching one of your "
+        f"allowed transitions for state `{stage_str}`:\n\n"
+        "```baton-msg\n"
+        f"{example_str}\n"
+        "```"
+    )
+
+
+def format_denied_actions(denied_actions: Sequence[str]) -> str:
+    """'`RunCommand`' / '`RunCommand`, `WriteFile`' for messages; 'an action' when empty."""
+    names: List[str] = []
+    for a in denied_actions or []:
+        text = str(a).strip()
+        if text and text not in names:
+            names.append(text)
+    if not names:
+        return "an action"
+    return ", ".join(f"`{n}`" for n in names)
+
+
 def format_qa_history(qa_history: Optional[Sequence[Dict[str, Any]]]) -> str:
     """Formats Q&A rounds into readable markdown pairs, or 'None' if empty."""
     if not qa_history:

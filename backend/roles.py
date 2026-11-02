@@ -491,29 +491,72 @@ def get_role_label(role: Union[RoleId, str]) -> str:
     return str(role)
 
 
-def resolve_system_prompt(role: RoleId, custom_prompt: Optional[str] = None) -> str:
+_SHELL_NOTE = (
+    "shell is limited to read-only commands (ls, find, cat, grep, git status/diff/log); "
+    "anything else will be denied and ends your turn with no reply — never rely on it."
+)
+
+PERMISSION_NOTES: Dict[PermissionLevel, str] = {
+    PermissionLevel.READONLY: (
+        "Your permissions: you can read files with your file tools but cannot edit them; "
+        + _SHELL_NOTE
+    ),
+    PermissionLevel.EDIT: (
+        "Your permissions: you can read and edit files with your file tools; " + _SHELL_NOTE
+    ),
+}
+
+
+def permission_note(permission: Optional[Union[PermissionLevel, str]]) -> str:
+    """One-line capability note appended to role prompts; empty for `full` (unchanged)."""
+    if permission is None:
+        return ""
+    try:
+        return PERMISSION_NOTES.get(PermissionLevel(permission), "")
+    except ValueError:
+        return ""
+
+
+def _with_permission_note(
+    prompt: str, permission: Optional[Union[PermissionLevel, str]]
+) -> str:
+    note = permission_note(permission)
+    if not note:
+        return prompt
+    return f"{prompt}\n\n{note}" if prompt else note
+
+
+def resolve_system_prompt(
+    role: RoleId,
+    custom_prompt: Optional[str] = None,
+    permission: Optional[Union[PermissionLevel, str]] = None,
+) -> str:
     """
     For RoleId.CUSTOM, returns (custom_prompt or "").strip().
     For built-in roles, returns ROLE_DEFINITIONS[role].system_prompt, appending
-    custom_prompt if non-empty.
+    custom_prompt if non-empty. When `permission` is given, a short capability note for
+    that permission level is appended (nothing for `full`).
     """
     cleaned_custom = (custom_prompt or "").strip()
     if role == RoleId.CUSTOM:
-        return cleaned_custom
+        return _with_permission_note(cleaned_custom, permission)
 
     role_def = ROLE_DEFINITIONS.get(role)
     base_prompt = role_def.system_prompt if role_def else ""
     if cleaned_custom:
-        return f"{base_prompt}\n\nAdditional Instructions:\n{cleaned_custom}"
-    return base_prompt
+        base_prompt = f"{base_prompt}\n\nAdditional Instructions:\n{cleaned_custom}"
+    return _with_permission_note(base_prompt, permission)
 
 
 def resolve_team_system_prompt(
-    role: Union[RoleId, str], custom_prompt: Optional[str] = None
+    role: Union[RoleId, str],
+    custom_prompt: Optional[str] = None,
+    permission: Optional[Union[PermissionLevel, str]] = None,
 ) -> str:
     """
     Resolves the system prompt for a team role from TEAM_ROLE_DEFINITIONS,
-    appending custom_prompt if non-empty.
+    appending custom_prompt if non-empty and (when `permission` is given) the
+    capability note for that permission level.
     """
     try:
         role_enum = role if isinstance(role, RoleId) else RoleId(str(role))
@@ -522,12 +565,13 @@ def resolve_team_system_prompt(
 
     cleaned_custom = (custom_prompt or "").strip()
     if role_enum == RoleId.CUSTOM:
-        return cleaned_custom
+        return _with_permission_note(cleaned_custom, permission)
 
     role_def = TEAM_ROLE_DEFINITIONS.get(role_enum) if role_enum is not None else None
     base_prompt = role_def.system_prompt if role_def else ""
     if cleaned_custom:
         if base_prompt:
-            return f"{base_prompt}\n\nAdditional Instructions:\n{cleaned_custom}"
-        return cleaned_custom
-    return base_prompt
+            base_prompt = f"{base_prompt}\n\nAdditional Instructions:\n{cleaned_custom}"
+        else:
+            base_prompt = cleaned_custom
+    return _with_permission_note(base_prompt, permission)

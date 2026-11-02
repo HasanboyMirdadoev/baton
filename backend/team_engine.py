@@ -46,7 +46,9 @@ from backend.team_protocol import (
     MIN_MOCKUP_BYTES,
     REVIEW_DIFF_FILENAME,
     ParsedTeamMessage,
+    build_denied_action_repair_prompt,
     build_format_repair_prompt,
+    format_denied_actions,
     build_prompt_pm_mockup_review,
     build_prompt_t1,
     build_prompt_t1_pm_triage,
@@ -131,6 +133,12 @@ def _int_or(value: Any, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _turn_denied_actions(turn: Optional[Dict[str, Any]]) -> List[str]:
+    """Names of actions the CLI auto-denied during this turn (empty when none)."""
+    raw = (turn or {}).get("denied_actions") or []
+    return [str(a) for a in raw if str(a).strip()] if isinstance(raw, list) else []
 
 
 def _apply_resume_note(prompt: str, note: Optional[str]) -> str:
@@ -1549,40 +1557,76 @@ class TeamEngine:
         if parsed.valid:
             return turn, parsed, True
 
-        # Single re-prompt recovery (Section 4.3)
+        # Re-prompt recovery (Section 4.3). Two independent single-shot repairs:
+        #  - format repair: generic "emit a valid baton-msg block" (once);
+        #  - denial repair: used instead when the failed turn had denied actions (headless CLI
+        #    auto-denied a command and ended the turn, typically with an empty reply). It has its
+        #    own budget so a denial never burns the format repair; if the role is denied again
+        #    after being told, the run fails naming the denied action.
         original_body = parsed.body_markdown
-        repair_prompt = build_format_repair_prompt(
-            parsed,
-            stage_state=stage_str,
-            role=role_str,
-            asking_role=cur_run.get("asking_role"),
-        )
-        retry_turn, retry_ok = await self._execute_single_session_turn(
-            run_id=run_id,
-            role_str=role_str,
-            stage_str=stage_str,
-            prompt=repair_prompt,
-            record_elapsed=record_elapsed,
-        )
-        if not retry_ok or retry_turn is None:
-            return retry_turn, None, False
+        cur_turn: Dict[str, Any] = turn
+        cur_parsed = parsed
+        format_retry_used = False
+        denial_retry_used = False
+        while True:
+            denied = _turn_denied_actions(cur_turn)
+            if denied:
+                if denial_retry_used:
+                    fail_msg = (
+                        f"Role '{role_str}' was denied {format_denied_actions(denied)} "
+                        "(headless mode cannot approve it; only file tools and read-only "
+                        "commands are allowed) and still failed to emit a valid baton-msg "
+                        f"block after the denial retry: {cur_parsed.error}"
+                    )
+                    await self._mark_run_failed(run_id, fail_msg)
+                    return cur_turn, cur_parsed, False
+                denial_retry_used = True
+                repair_prompt = build_denied_action_repair_prompt(
+                    denied,
+                    cur_parsed,
+                    stage_state=stage_str,
+                    role=role_str,
+                    asking_role=cur_run.get("asking_role"),
+                )
+            else:
+                if format_retry_used:
+                    fail_msg = (
+                        f"Role '{role_str}' failed to emit a valid baton-msg block after 1 retry: "
+                        f"{cur_parsed.error}"
+                    )
+                    await self._mark_run_failed(run_id, fail_msg)
+                    return cur_turn, cur_parsed, False
+                format_retry_used = True
+                repair_prompt = build_format_repair_prompt(
+                    cur_parsed,
+                    stage_state=stage_str,
+                    role=role_str,
+                    asking_role=cur_run.get("asking_role"),
+                )
 
-        cur_run = self.db.get_team_run(run_id) or cur_run
-        retry_reply = str(retry_turn.get("response_text") or "")
-        retry_parsed = self._validate_parsed_for_run(
-            cur_run, role_str, stage_str, retry_reply
-        )
-        if retry_parsed.valid:
-            if not retry_parsed.body_markdown.strip() and original_body.strip():
-                retry_parsed.body_markdown = original_body
-            return retry_turn, retry_parsed, True
+            retry_turn, retry_ok = await self._execute_single_session_turn(
+                run_id=run_id,
+                role_str=role_str,
+                stage_str=stage_str,
+                prompt=repair_prompt,
+                record_elapsed=record_elapsed,
+            )
+            if not retry_ok or retry_turn is None:
+                return retry_turn, None, False
 
-        fail_msg = (
-            f"Role '{role_str}' failed to emit a valid baton-msg block after 1 retry: "
-            f"{retry_parsed.error}"
-        )
-        await self._mark_run_failed(run_id, fail_msg)
-        return retry_turn, retry_parsed, False
+            cur_run = self.db.get_team_run(run_id) or cur_run
+            retry_reply = str(retry_turn.get("response_text") or "")
+            retry_parsed = self._validate_parsed_for_run(
+                cur_run, role_str, stage_str, retry_reply
+            )
+            if retry_parsed.valid:
+                if not retry_parsed.body_markdown.strip() and original_body.strip():
+                    retry_parsed.body_markdown = original_body
+                return retry_turn, retry_parsed, True
+
+            if not original_body.strip():
+                original_body = retry_parsed.body_markdown
+            cur_turn, cur_parsed = retry_turn, retry_parsed
 
     # -----------------------------------------------------------------------
     # State Machine Stage Handlers (Section 3.3)

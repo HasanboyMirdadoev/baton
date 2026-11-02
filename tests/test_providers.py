@@ -6,6 +6,8 @@ from pathlib import Path
 
 from backend.config import AppConfig
 from backend.models import NormalizedEventType, PermissionLevel, ProviderId
+from backend.providers.antigravity import agy_settings_json
+from backend.providers.safe_commands import claude_allowed_tools
 from backend.providers import (
     AntigravityAdapter,
     ClaudeAdapter,
@@ -43,7 +45,9 @@ def test_claude_build_command_first_and_subsequent_turns() -> None:
         "--permission-prompts",
         "none",
         "--disallowedTools",
-        "Edit,Write,NotebookEdit,Bash",
+        "Edit,Write,NotebookEdit",
+        "--allowedTools",
+        ",".join(claude_allowed_tools()),
         "--append-system-prompt",
         "You are a designer.",
         "--",
@@ -74,6 +78,8 @@ def test_claude_build_command_first_and_subsequent_turns() -> None:
         "acceptEdits",
         "--permission-prompts",
         "none",
+        "--allowedTools",
+        ",".join(claude_allowed_tools()),
         "--",
         "Now update foo.py",
     ]
@@ -111,6 +117,8 @@ def test_antigravity_build_command_first_and_subsequent_turns() -> None:
         "stream-json",
         "--mode",
         "plan",
+        "--settings",
+        agy_settings_json(PermissionLevel.READONLY),
         "--model",
         "gemini-4-argon-high",
         "-p",
@@ -132,6 +140,8 @@ def test_antigravity_build_command_first_and_subsequent_turns() -> None:
         "stream-json",
         "--mode",
         "accept-edits",
+        "--settings",
+        agy_settings_json(PermissionLevel.EDIT),
         "--model",
         "gemini-3.8-flash-medium",
         "--conversation",

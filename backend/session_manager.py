@@ -191,22 +191,23 @@ class SessionManager:
         adapter = get_adapter(ProviderId(session["provider"]), self.config)
         is_first_turn = session.get("provider_session_id") is None
         role_enum = RoleId(session["role"])
+        session_permission = PermissionLevel(session["permission_level"])
         if (
             session.get("team_run_id")
             or turn.get("team_run_id")
             or role_enum not in ROLE_DEFINITIONS
         ):
             sys_prompt = resolve_team_system_prompt(
-                role_enum, session.get("custom_prompt")
+                role_enum, session.get("custom_prompt"), session_permission
             )
         else:
             sys_prompt = resolve_system_prompt(
-                role_enum, session.get("custom_prompt")
+                role_enum, session.get("custom_prompt"), session_permission
             )
         cmd = adapter.build_command(
             prompt=turn["prompt"],
             model=session["model"],
-            permission=PermissionLevel(session["permission_level"]),
+            permission=session_permission,
             system_prompt=sys_prompt,
             provider_conversation_id=session.get("provider_session_id"),
             is_first_turn=is_first_turn,
